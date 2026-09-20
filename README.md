@@ -1,477 +1,411 @@
 # Distributed URL Shortener
 
-A backend-focused URL shortening service built with **Java 17, Spring Boot, Maven, and MySQL**.
-
-The project is being developed step-by-step with a focus on understanding and implementing the foundations required for a **scalable, concurrent, and distributed backend system**.
+A backend URL Shortener built using **Java 17, Spring Boot, Maven, and MySQL**, designed with a foundation for future distributed-system features such as Redis caching, rate limiting, horizontal scaling, database replication/sharding, and load balancing.
 
 ---
 
-## 🚧 Project Status
+## 📅 Work Completed — September 20, 2026
 
-**Current Stage:** Initial project structure and backend architecture
+Today's work focused on completing the basic **URL shortening and URL redirection flow** and testing the REST API using **Postman**.
 
-The initial layered structure has been created and pushed to GitHub. The classes and packages currently define the intended architecture, while the core business logic and infrastructure features are being implemented incrementally.
+### 1. Built `UrlController`
 
-### Current Technology Stack
+The `UrlController` was implemented to expose REST endpoints for the URL shortener.
 
-* **Java 17**
-* **Spring Boot**
-* **Maven**
-* **MySQL**
-* **Spring Web**
-* **Git & GitHub**
-
----
-
-## 📁 Project Structure
+Current base mapping:
 
 ```text
-distributed-url-shortener/
-│
-├── src/
-│   ├── main/
-│   │   ├── java/
-│   │   │   └── .../
-│   │   │       └── urlshortener/
-│   │   │           │
-│   │   │           ├── config/
-│   │   │           │
-│   │   │           ├── controller/
-│   │   │           │   └── UrlController.java
-│   │   │           │
-│   │   │           ├── dto/
-│   │   │           │   ├── ShortenUrlRequest.java
-│   │   │           │   └── ShortenUrlResponse.java
-│   │   │           │
-│   │   │           ├── exception/
-│   │   │           │   ├── GlobalExceptionHandler.java
-│   │   │           │   └── UrlNotFoundException.java
-│   │   │           │
-│   │   │           ├── model/
-│   │   │           │   └── UrlMapping.java
-│   │   │           │
-│   │   │           ├── repository/
-│   │   │           │   └── UrlRepository.java
-│   │   │           │
-│   │   │           ├── service/
-│   │   │           │   └── UrlService.java
-│   │   │           │
-│   │   │           └── UrlShortenerApplication.java
-│   │   │
-│   │   └── resources/
-│   │       └── application.properties
-│   │
-│   └── test/
-│
-├── .gitignore
-├── mvnw
-├── mvnw.cmd
-├── pom.xml
-└── README.md
+/shorten
+```
+
+### POST — Create Short URL
+
+```http
+POST http://localhost:8080/shorten
+```
+
+Request body:
+
+```json
+{
+    "originalUrl": "https://www.google.com"
+}
+```
+
+The request flows through:
+
+```text
+Postman
+   ↓
+UrlController
+   ↓
+UrlService
+   ↓
+ShortCodeGenerator
+   ↓
+UrlRepository
+   ↓
+MySQL
+```
+
+The service generates a short code, creates a `UrlMapping`, and stores the mapping in MySQL.
+
+---
+
+## 2. Added GET Redirect Endpoint
+
+A GET endpoint was added to resolve a generated short code.
+
+```http
+GET http://localhost:8080/shorten/{shortCode}
+```
+
+Example:
+
+```http
+GET http://localhost:8080/shorten/aB3xY7
+```
+
+The request flow is:
+
+```text
+GET /shorten/aB3xY7
+        ↓
+UrlController
+        ↓
+UrlService
+        ↓
+UrlRepository
+        ↓
+MySQL
+        ↓
+Find original URL
+        ↓
+302 Found
+        ↓
+Location: original URL
+```
+
+The controller returns:
+
+```text
+HTTP 302 Found
+```
+
+with the original URL in the `Location` header.
+
+Example:
+
+```text
+Location: https://www.google.com
 ```
 
 ---
 
-## 🏗️ Architecture
+## 3. Updated `UrlService`
 
-The project follows a layered backend architecture:
+The `UrlService` now supports both:
+
+### Creating a short URL
+
+```java
+public ShortenUrlResponse shortenUrl(ShortenUrlRequest request)
+```
+
+### Resolving a short URL
+
+```java
+public String getOriginalUrl(String shortCode)
+```
+
+The GET functionality uses:
+
+```java
+urlRepository.findByShortCode(shortCode)
+```
+
+If the short code does not exist, a:
+
+```java
+UrlNotFoundException
+```
+
+is thrown.
+
+---
+
+## 4. Postman API Testing
+
+### POST Request
+
+**Method:**
+
+```text
+POST
+```
+
+**URL:**
+
+```text
+http://localhost:8080/shorten
+```
+
+**Body → raw → JSON:**
+
+```json
+{
+    "originalUrl": "https://www.google.com"
+}
+```
+
+This request is used to create a new short URL.
+
+---
+
+### GET Request
+
+After receiving a generated short code, for example:
+
+```text
+aB3xY7
+```
+
+send:
+
+```text
+GET http://localhost:8080/shorten/aB3xY7
+```
+
+The expected behavior is:
+
+```text
+302 Found
+```
+
+with:
+
+```text
+Location: https://www.google.com
+```
+
+---
+
+## 5. Postman Redirect Testing
+
+While testing the GET endpoint, Postman may automatically follow the `302` redirect.
+
+For example:
+
+```text
+GET /shorten/aB3xY7
+        ↓
+302 Found
+        ↓
+https://www.google.com
+        ↓
+Google HTML response
+```
+
+This can make it appear as though the API returned Google's HTML.
+
+The application is actually working correctly.
+
+To inspect the redirect itself:
+
+1. Open the GET request in Postman.
+2. Open the request settings.
+3. Disable **Follow redirects**.
+4. Send the request again.
+
+The response should then show:
+
+```text
+302 Found
+```
+
+and the response headers should contain:
+
+```text
+Location: https://www.google.com
+```
+
+---
+
+## 6. Current API Structure
+
+```text
+                    URL SHORTENER API
+                           │
+                 ┌─────────┴─────────┐
+                 │                   │
+                POST                GET
+                 │                   │
+             /shorten          /shorten/{code}
+                 │                   │
+                 ▼                   ▼
+          Create mapping       Resolve short code
+                 │                   │
+                 └─────────┬─────────┘
+                           │
+                      UrlService
+                           │
+                    UrlRepository
+                           │
+                         MySQL
+```
+
+---
+
+## 7. Current Application Flow
+
+### URL Creation
 
 ```text
 Client
   │
+  │ POST /shorten
+  │
+  │ { "originalUrl": "https://www.google.com" }
   ▼
-Controller
+UrlController
   │
   ▼
-Service
+UrlService
+  │
+  ├── Generate short code
+  │
+  ├── Create UrlMapping
+  │
+  └── Save mapping
+          │
+          ▼
+     UrlRepository
+          │
+          ▼
+        MySQL
+```
+
+### URL Redirection
+
+```text
+Client
+  │
+  │ GET /shorten/{shortCode}
+  ▼
+UrlController
   │
   ▼
-Repository
+UrlService
+  │
+  ▼
+UrlRepository
   │
   ▼
 MySQL
-```
-
-### Layers
-
-#### Controller
-
-Responsible for handling HTTP requests and returning HTTP responses.
-
-```text
-controller/
-└── UrlController.java
-```
-
-#### Service
-
-Contains the application's business logic.
-
-```text
-service/
-└── UrlService.java
-```
-
-#### Repository
-
-Responsible for database interaction.
-
-```text
-repository/
-└── UrlRepository.java
-```
-
-#### Model
-
-Represents the application's data model.
-
-```text
-model/
-└── UrlMapping.java
-```
-
-#### DTO
-
-Data Transfer Objects are used to define the structure of data exchanged through the API.
-
-```text
-dto/
-├── ShortenUrlRequest.java
-└── ShortenUrlResponse.java
-```
-
-#### Exception
-
-Centralized exception-related components.
-
-```text
-exception/
-├── GlobalExceptionHandler.java
-└── UrlNotFoundException.java
-```
-
-#### Configuration
-
-Configuration-related components will be placed here as the project grows.
-
-```text
-config/
+  │
+  │ original URL
+  ▼
+UrlController
+  │
+  │ 302 Found
+  │ Location: original URL
+  ▼
+Client
 ```
 
 ---
 
-## 🎯 Project Goal
+## 8. Key Concept Learned Today
 
-The long-term goal is to build a URL shortener that goes beyond a basic CRUD application and demonstrates concepts used in production backend systems.
+An important distinction was established between the **endpoint URL** and the **URL contained in the request body**.
 
-The planned system will progressively cover:
+### Endpoint URL
 
-* REST API design
-* URL shortening
-* URL redirection
-* Java concurrency
-* Thread safety
-* Database indexing
-* Transactions
-* Redis caching
-* Rate limiting
-* Distributed systems
-* Horizontal scaling
-* Load balancing
-* Database replication
-* Database sharding
-* Consistent hashing
-* Docker
-* Containerization
-* Monitoring and observability
+This tells Spring Boot **which operation to execute**.
 
-These features are part of the planned development roadmap and are **not all implemented yet**.
+Example:
+
+```text
+POST http://localhost:8080/shorten
+```
+
+### Original URL
+
+This is the actual data being sent to the application:
+
+```json
+{
+    "originalUrl": "https://www.google.com"
+}
+```
+
+The application stores the relationship:
+
+```text
+Short Code ──────────────► Original URL
+
+aB3xY7                    https://www.google.com
+```
+
+When a user later requests:
+
+```text
+GET /shorten/aB3xY7
+```
+
+the application looks up `aB3xY7` and redirects the user to the stored original URL.
 
 ---
 
-## 🛠️ Development Approach
+## 9. Status Codes Used
 
-The project is intentionally being developed incrementally.
+| Operation            | HTTP Method | Endpoint               | Expected Status |
+| -------------------- | ----------- | ---------------------- | --------------- |
+| Create short URL     | POST        | `/shorten`             | `201 Created`   |
+| Resolve short URL    | GET         | `/shorten/{shortCode}` | `302 Found`     |
+| Short code not found | GET         | `/shorten/{shortCode}` | `404 Not Found` |
 
-Instead of building the entire application at once, each component is being implemented after understanding the underlying concept.
+---
 
-The development progression is broadly:
+## 10. Today's Progress
+
+* [x] Built/updated `UrlController`
+* [x] Added POST `/shorten`
+* [x] Added GET `/shorten/{shortCode}`
+* [x] Connected controller to `UrlService`
+* [x] Implemented `getOriginalUrl()`
+* [x] Connected short-code lookup to `UrlRepository`
+* [x] Tested GET endpoint with Postman
+* [x] Verified URL redirection behavior
+* [x] Understood Postman's automatic redirect behavior
+* [x] Understood the difference between API endpoint URL and original URL
+* [ ] Debug/fix POST `500 Internal Server Error`
+* [ ] Continue building distributed-system features
+
+---
+
+## 🚀 Next Step
+
+The next development step is to investigate and fix the **500 Internal Server Error occurring during the POST `/shorten` request**.
+
+After the basic shortening and redirection flow is stable, the project can progress toward:
 
 ```text
-Backend Foundations
-        │
-        ▼
-HTTP & REST
-        │
-        ▼
-Java Concurrency
-        │
-        ▼
-Thread Safety
-        │
-        ▼
-Networking
-        │
-        ▼
-Database Fundamentals
-        │
-        ▼
-URL Shortener Core
-        │
-        ▼
-Caching & Redis
-        │
-        ▼
+Redis Caching
+      ↓
 Rate Limiting
-        │
-        ▼
-Distributed Systems
-        │
-        ▼
-Docker & Deployment
-        │
-        ▼
-Scaling & High Availability
+      ↓
+Concurrency & Thread Safety
+      ↓
+Docker
+      ↓
+Load Balancing
+      ↓
+Horizontal Scaling
+      ↓
+Database Replication
+      ↓
+Database Sharding
+      ↓
+Distributed URL Shortener
 ```
-
----
-
-## 📋 Current Components
-
-| Component                 | Status               |
-| ------------------------- | -------------------- |
-| Spring Boot project       | ✅ Created            |
-| Java 17                   | ✅ Configured         |
-| Maven                     | ✅ Configured         |
-| Layered package structure | ✅ Created            |
-| Controller layer          | 🟡 Structure created |
-| Service layer             | 🟡 Structure created |
-| Repository layer          | 🟡 Structure created |
-| DTOs                      | 🟡 Structure created |
-| Model                     | 🟡 Structure created |
-| Exception layer           | 🟡 Structure created |
-| MySQL integration         | 🔄 To be implemented |
-| URL generation logic      | 🔄 To be implemented |
-| URL redirection           | 🔄 To be implemented |
-| Validation                | 🔄 To be implemented |
-| Concurrency handling      | 🔄 To be implemented |
-| Redis caching             | 🔄 Planned           |
-| Rate limiting             | 🔄 Planned           |
-| Docker                    | 🔄 Planned           |
-| Horizontal scaling        | 🔄 Planned           |
-| Database replication      | 🔄 Planned           |
-| Database sharding         | 🔄 Planned           |
-
----
-
-## 🚀 Running the Project
-
-### Prerequisites
-
-Make sure the following are installed:
-
-* Java 17
-* Maven
-* MySQL
-* Git
-
-### Clone the Repository
-
-```bash
-git clone <repository-url>
-cd distributed-url-shortener
-```
-
-### Run Using Maven Wrapper
-
-On Windows:
-
-```bash
-mvnw.cmd spring-boot:run
-```
-
-On Linux/macOS:
-
-```bash
-./mvnw spring-boot:run
-```
-
----
-
-## 🔀 Git Workflow
-
-The project is maintained using Git and GitHub.
-
-The basic workflow is:
-
-```text
-Modify Code
-    │
-    ▼
-git status
-    │
-    ▼
-git add .
-    │
-    ▼
-git commit
-    │
-    ▼
-git push
-    │
-    ▼
-GitHub Repository
-```
-
----
-
-## 📚 Learning Objectives
-
-This project is also being used as a practical way to learn backend engineering concepts.
-
-Key concepts include:
-
-### Backend
-
-* HTTP
-* REST APIs
-* JSON
-* Spring Boot
-* Layered architecture
-* Dependency Injection
-
-### Java
-
-* OOP
-* Collections
-* Multithreading
-* Executors
-* Concurrency
-* Synchronization
-* Thread safety
-* Concurrent data structures
-
-### Networking
-
-* DNS
-* TCP/IP
-* Ports
-* Sockets
-* Reverse proxies
-* Load balancers
-
-### Databases
-
-* SQL
-* Indexes
-* Transactions
-* Database concurrency
-* Replication
-* Sharding
-
-### Distributed Systems
-
-* Scalability
-* Availability
-* Consistency
-* CAP theorem
-* Distributed caching
-* Consistent hashing
-* Horizontal scaling
-
----
-
-## 🔮 Future Architecture
-
-As the project evolves, the architecture is expected to progress from:
-
-```text
-Client
-   │
-   ▼
-Spring Boot Application
-   │
-   ▼
-MySQL
-```
-
-toward a more distributed architecture:
-
-```text
-                    ┌───────────────┐
-                    │    Client     │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │ Load Balancer │
-                    └───────┬───────┘
-                            │
-              ┌─────────────┼─────────────┐
-              │             │             │
-              ▼             ▼             ▼
-          ┌────────┐    ┌────────┐    ┌────────┐
-          │ Server │    │ Server │    │ Server │
-          │   1    │    │   2    │    │   3    │
-          └───┬────┘    └───┬────┘    └───┬────┘
-              │             │             │
-              └─────────────┼─────────────┘
-                            │
-                    ┌───────▼───────┐
-                    │     Redis     │
-                    └───────┬───────┘
-                            │
-                    ┌───────▼───────┐
-                    │    MySQL      │
-                    │  Replication  │
-                    └───────────────┘
-```
-
-This represents the **planned direction of the project**, not the current implementation.
-
----
-
-## 📌 Roadmap
-
-* [x] Create Spring Boot project
-* [x] Configure Java 17
-* [x] Configure Maven
-* [x] Create initial package structure
-* [x] Create core classes
-* [x] Initialize Git repository
-* [x] Connect project to GitHub
-* [x] Push initial project structure
-* [ ] Implement URL shortening
-* [ ] Implement URL retrieval
-* [ ] Implement URL redirection
-* [ ] Connect MySQL
-* [ ] Add database indexes
-* [ ] Add validation
-* [ ] Implement concurrency-safe URL generation
-* [ ] Add Redis caching
-* [ ] Implement rate limiting
-* [ ] Dockerize application
-* [ ] Add load balancing
-* [ ] Implement horizontal scaling
-* [ ] Add database replication
-* [ ] Explore database sharding
-* [ ] Add monitoring and observability
-
----
-
-## 👨‍💻 Project
-
-**Distributed URL Shortener**
-
-Built with:
-
-```text
-Java 17
-Spring Boot
-Maven
-MySQL
-Git
-GitHub
-```
-
-The project is being developed incrementally to understand how a simple URL shortener can evolve into a scalable distributed backend system.
