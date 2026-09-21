@@ -1,5 +1,7 @@
 package com.example.urlshortener.model;
 
+import java.time.LocalDateTime;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -27,6 +29,9 @@ public class UrlMapping {
     @Column(name = "short_code", nullable = false, unique = true, length = 8)
     private String shortCode;
 
+    @Column(name = "expires_at")
+    private LocalDateTime expiresAt;
+
     public UrlMapping() {
     }
 
@@ -53,5 +58,13 @@ public class UrlMapping {
 
     public void setShortCode(String shortCode) {
         this.shortCode = shortCode;
+    }
+
+    public LocalDateTime getExpiresAt() {
+        return expiresAt;
+    }
+
+    public void setExpiresAt(LocalDateTime expiresAt) {
+        this.expiresAt = expiresAt;
     }
 }
