@@ -33,6 +33,43 @@ public class UrlService {
 
     public ShortenUrlResponse shortenUrl(ShortenUrlRequest request) {
 
+        /*
+         * First check whether this original URL already exists.
+         */
+        var existingUrl = urlRepository.findByOriginalUrl(
+                request.getOriginalUrl()
+        );
+
+        if (existingUrl.isPresent()) {
+
+            UrlMapping urlMapping = existingUrl.get();
+
+            /*
+             * If the existing short URL has not expired,
+             * return the existing short code.
+             *
+             * No new database row is created.
+             */
+            if (urlMapping.getExpiresAt() != null &&
+                    LocalDateTime.now().isBefore(urlMapping.getExpiresAt())) {
+
+                return new ShortenUrlResponse(
+                        urlMapping.getShortCode(),
+                        urlMapping.getOriginalUrl(),
+                        "URL already shortened. Returning existing short code."
+                );
+            }
+
+            /*
+             * If the existing URL has expired, remove it.
+             * A new short code can then be generated.
+             */
+            urlRepository.delete(urlMapping);
+        }
+
+        /*
+         * Generate a new short code.
+         */
         for (int attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
 
             String shortCode = shortCodeGenerator.generateShortCode();
@@ -52,18 +89,37 @@ public class UrlService {
 
                 return new ShortenUrlResponse(
                         savedUrl.getShortCode(),
-                        savedUrl.getOriginalUrl()
+                        savedUrl.getOriginalUrl(),
+                        "URL shortened successfully."
                 );
 
             } catch (DataIntegrityViolationException ex) {
 
                 /*
-                 * Another concurrent request may have generated
-                 * the same short code.
+                 * Another concurrent request may have inserted
+                 * the same original URL or the same short code.
                  *
-                 * Generate a new code and try again.
+                 * Check whether the original URL now exists.
+                 */
+                var concurrentUrl = urlRepository.findByOriginalUrl(
+                        request.getOriginalUrl()
+                );
+
+                if (concurrentUrl.isPresent()) {
+
+                    return new ShortenUrlResponse(
+                            concurrentUrl.get().getShortCode(),
+                            concurrentUrl.get().getOriginalUrl(),
+                            "URL already shortened. Returning existing short code."
+                    );
+                }
+
+                /*
+                 * If the failure was caused by a short-code collision,
+                 * generate another short code and try again.
                  */
                 if (attempt == MAX_GENERATION_ATTEMPTS) {
+
                     throw new IllegalStateException(
                             "Unable to generate a unique short code",
                             ex

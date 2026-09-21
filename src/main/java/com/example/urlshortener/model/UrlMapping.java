@@ -14,7 +14,14 @@ import jakarta.persistence.UniqueConstraint;
 @Table(
         name = "url_mapping",
         uniqueConstraints = {
-                @UniqueConstraint(name = "uk_short_code", columnNames = "short_code")
+                @UniqueConstraint(
+                        name = "uk_short_code",
+                        columnNames = "short_code"
+                ),
+                @UniqueConstraint(
+                        name = "uk_original_url",
+                        columnNames = "original_url"
+                )
         }
 )
 public class UrlMapping {

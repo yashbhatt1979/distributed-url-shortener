@@ -1,588 +1,534 @@
 # Distributed URL Shortener
 
-A production-oriented URL Shortener built with **Java 17, Spring Boot, Maven, MySQL, Spring Data JPA, and Flyway**.
+A backend URL-shortening service built with **Java 17, Spring Boot, Maven, and MySQL**, designed with concurrency, thread safety, expiration, and future distributed-system scalability in mind.
 
-The project is being developed step-by-step with a focus on understanding the underlying concepts rather than simply implementing features.
-
----
-
-## Today's Progress — Concurrency & Thread Safety
-
-### Date
-
-**21 September 2026**
-
-Today we analyzed the existing URL Shortener from a **thread-safety and concurrency** perspective.
-
-The main goal was to understand how multiple HTTP requests can execute concurrently and how to make the application safe without unnecessarily using Java's `synchronized` keyword.
+The project is being developed step-by-step to understand how a production-style URL shortener handles **concurrent requests, duplicate data, database constraints, expiration, caching, rate limiting, and horizontal scaling**.
 
 ---
 
-# 1. Understanding Spring Boot Concurrency
+## Tech Stack
 
-Spring Boot applications can process multiple HTTP requests concurrently.
+* **Java 17**
+* **Spring Boot**
+* **Maven**
+* **Spring Data JPA / Hibernate**
+* **MySQL**
+* **Flyway**
+* **REST API**
+* **Git & GitHub**
 
-Conceptually:
+---
 
-```text
-Request 1 ──→ Thread 1 ──┐
-Request 2 ──→ Thread 2 ──┤
-Request 3 ──→ Thread 3 ──┼──→ Spring Boot Application
-Request 4 ──→ Thread 4 ──┘
+## Current Features
+
+### 1. URL Shortening
+
+Clients can submit an original URL through:
+
+```http
+POST /shorten
 ```
 
-Therefore, application components must be designed so that concurrent requests do not corrupt shared state.
+The service generates a short code and stores the mapping in MySQL.
 
-The main principle established today was:
-
-> **Avoid shared mutable state instead of automatically using `synchronized`.**
-
----
-
-# 2. UrlController — Thread Safety
-
-The `UrlController` was reviewed.
-
-Current structure:
+Basic flow:
 
 ```text
+POST /shorten
+      ↓
 UrlController
-     ↓
+      ↓
 UrlService
+      ↓
+UrlRepository
+      ↓
+MySQL
 ```
-
-The controller contains only:
-
-```java
-private final UrlService urlService;
-```
-
-and request-specific local variables.
-
-There is no shared mutable request state.
-
-### Result
-
-**No changes required.**
-
-The controller can safely handle concurrent requests.
-
-We deliberately did **not** use:
-
-```java
-synchronized
-```
-
-on controller methods because that would unnecessarily serialize incoming requests.
 
 ---
 
-# 3. UrlService — Concurrency
+### 2. Short URL Redirection
 
-The `UrlService` was analyzed as the main application-level component.
+A short code can be used to retrieve the original URL.
 
-The service is effectively **stateless**:
-
-```text
-UrlService
-├── UrlRepository
-├── ShortCodeGenerator
-└── expirationHours
+```http
+GET /{shortCode}
 ```
 
-There is no mutable request-specific state stored inside the service.
+The service:
 
-### Short-code collision handling
+1. Searches for the short code.
+2. Checks whether the mapping exists.
+3. Checks whether the URL has expired.
+4. Returns the original URL when valid.
 
-A concurrency problem can theoretically occur:
+---
+
+### 3. URL Expiration
+
+Each generated short URL has a **4-hour expiration time**.
+
+The expiration timestamp is stored in:
 
 ```text
-Thread A → generates ABC123
-Thread B → generates ABC123
+expires_at
 ```
 
-Both may attempt:
+The expiration time is calculated when the URL is created:
+
+```java
+LocalDateTime.now().plusHours(expirationHours)
+```
+
+The expiration period is configurable through:
+
+```properties
+app.url-expiration-hours=4
+```
+
+---
+
+### 4. Automatic Expiration Cleanup
+
+The project contains:
 
 ```text
-INSERT ABC123
+UrlExpirationScheduler
 ```
 
-The solution is **not** a global Java lock.
+The scheduler periodically removes expired URL mappings from the database.
 
-Instead:
+Important distinction:
+
+```text
+Scheduler
+   ↓
+Cleans expired records from DB
+```
+
+while request-time validation:
+
+```text
+GET /{shortCode}
+   ↓
+Check expiresAt
+   ↓
+Reject expired URL
+```
+
+provides immediate protection even before the scheduler removes the record.
+
+The scheduler runs only while the Spring Boot application is running.
+
+---
+
+# Concurrency & Thread Safety
+
+Concurrency is a major design focus of this project.
+
+Spring Boot can process multiple HTTP requests concurrently, so the application must correctly handle multiple requests accessing the same data at the same time.
+
+---
+
+## 5. Short Code Collision Protection
+
+Short codes are generated dynamically.
+
+Multiple requests could theoretically generate the same short code.
+
+The database therefore enforces:
+
+```text
+UNIQUE(short_code)
+```
+
+This provides a database-level guarantee that two URL mappings cannot have the same short code.
+
+The service also retries short-code generation when a database uniqueness violation occurs.
+
+Maximum generation attempts:
+
+```java
+MAX_GENERATION_ATTEMPTS = 5
+```
+
+Flow:
 
 ```text
 Generate short code
        ↓
-INSERT into MySQL
+Save to database
        ↓
-UNIQUE(short_code)
-       ↓
- ┌─────┴─────┐
- ↓           ↓
-Success    Collision
+Unique?
+  ↓          ↓
+ YES         NO
+  ↓           ↓
+Success    Generate another code
              ↓
-       Generate again
+           Retry
 ```
-
-The service was updated to retry short-code generation when a database uniqueness violation occurs.
-
-A maximum retry limit of **5 attempts** was introduced to prevent an endless retry loop.
 
 ---
 
-# 4. ShortCodeGenerator — Thread Safety
+# Duplicate Original URL Protection
 
-The `ShortCodeGenerator` was reviewed.
+## 6. Same URL → Same Short Code
 
-It uses:
-
-```java
-private final SecureRandom random = new SecureRandom();
-```
-
-and:
-
-```java
-StringBuilder shortCode = new StringBuilder(CODE_LENGTH);
-```
-
-### Why this is safe
-
-`SecureRandom` supports concurrent use.
-
-The `StringBuilder` is created inside:
-
-```java
-generateShortCode()
-```
-
-Therefore every invocation gets its own `StringBuilder`.
+The service prevents multiple database records from being created for the same original URL.
 
 For example:
 
 ```text
-Thread 1 → StringBuilder A
-Thread 2 → StringBuilder B
-Thread 3 → StringBuilder C
+POST https://example.com
 ```
 
-The builders are not shared between threads.
-
-### Result
-
-**No changes required.**
-
-We did not add `synchronized`.
-
----
-
-# 5. Why We Are Not Using `synchronized`
-
-An important concept established today:
-
-```java
-synchronized
-```
-
-is not a universal solution to concurrency.
-
-If we synchronized:
-
-```java
-public synchronized ShortenUrlResponse shortenUrl(...)
-```
-
-then:
+First request:
 
 ```text
-Thread 1 → executes
-Thread 2 → WAIT
-Thread 3 → WAIT
-Thread 4 → WAIT
+https://example.com → Ab12Cd
 ```
 
-This unnecessarily reduces concurrency.
-
-More importantly, `synchronized` only protects threads within **one JVM**.
-
-Eventually our distributed architecture may look like:
+A repeated request for the same URL returns:
 
 ```text
-              Load Balancer
-             /      |      \
-            ↓       ↓       ↓
-        Instance A B       C
+https://example.com → Ab12Cd
 ```
 
-A lock on Instance A does not protect Instance B or C.
+instead of generating another short code.
 
-Therefore, database-level and distributed coordination mechanisms are more appropriate for shared resources.
+The database also enforces:
+
+```text
+UNIQUE(original_url)
+```
+
+This gives the system two important database-level guarantees:
+
+```text
+short_code    → UNIQUE
+original_url  → UNIQUE
+```
 
 ---
 
-# 6. UrlRepository — Concurrency
+## Duplicate URL Request Flow
 
-The repository extends:
-
-```java
-JpaRepository<UrlMapping, Long>
+```text
+POST /shorten
+       ↓
+Check original_url
+       ↓
+Does it already exist?
+       │
+   ┌───┴───┐
+   │       │
+  YES      NO
+   │       │
+   ↓       ↓
+Return    Generate
+existing  short code
+code       │
+   │        ↓
+   │      INSERT
+   │        │
+   └────────┴──→ Response
 ```
 
-with:
+When the URL already exists and has not expired:
 
-```java
-Optional<UrlMapping> findByShortCode(String shortCode);
-
-void deleteByExpiresAtBefore(LocalDateTime time);
+```text
+No new database row is created.
 ```
 
-### Result
-
-No Java synchronization is required.
-
-Spring Data JPA and the database handle concurrent database operations.
-
-The repository itself does not maintain application-level mutable state that needs manual synchronization.
-
----
-
-# 7. Database-Level Uniqueness
-
-Our Flyway migration already contains:
-
-```sql
-CONSTRAINT uk_url_mapping_short_code UNIQUE (short_code)
-```
-
-This is one of the most important concurrency protections in the application.
-
-It guarantees that two concurrent requests cannot successfully insert the same short code.
+The API returns a message indicating that the existing short code is being returned.
 
 Example:
 
-```text
-Thread A → INSERT abc123 → SUCCESS
-
-Thread B → INSERT abc123 → UNIQUE constraint violation
-                              ↓
-                         Retry with new code
+```json
+{
+    "shortCode": "Ab12Cd",
+    "originalUrl": "https://example.com",
+    "message": "URL already shortened. Returning existing short code."
+}
 ```
-
-This protection works even when the application eventually runs across multiple Spring Boot instances.
 
 ---
 
-# 8. UrlMapping — Optimistic Locking
+# Concurrent Duplicate Requests
 
-We investigated whether to add:
+A simple application-level check is not sufficient by itself.
 
-```java
-@Version
-private Long version;
-```
-
-for optimistic locking.
-
-### Decision
-
-**Not added yet.**
-
-Our current URL lifecycle is primarily:
+For example, two requests could arrive simultaneously:
 
 ```text
-POST → INSERT
-GET  → SELECT
-Scheduler → DELETE
+Request A                    Request B
+    ↓                            ↓
+Check URL                  Check URL
+    ↓                            ↓
+Not found                  Not found
+    ↓                            ↓
+Generate code              Generate code
 ```
 
-We currently do not have multiple concurrent requests modifying the same `UrlMapping` record.
+Both requests could believe that the URL does not exist.
 
-Therefore, adding `@Version` at this stage would introduce a mechanism before we actually need it.
+Therefore, the database constraint is the final protection:
 
-Optimistic locking will become relevant when we introduce features such as:
+```text
+UNIQUE(original_url)
+```
 
-* URL updates
-* click counters
-* analytics counters
-* metadata modifications
-* other concurrent updates to the same row
+Only one database row can exist for a particular original URL.
+
+The service handles the resulting `DataIntegrityViolationException` and checks whether another concurrent request has already created the mapping.
+
+This provides protection at two levels:
+
+```text
+Application Level
+       +
+Database Level
+```
 
 ---
 
-# 9. UrlExpirationScheduler — Concurrency
+# Database Design
 
-The expiration scheduler was reviewed because it performs database deletes while HTTP requests may simultaneously read URLs.
+Current `url_mapping` table:
 
-The scheduler was updated to use:
+```sql
+CREATE TABLE url_mapping (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
 
-```java
-@Transactional
+    short_code VARCHAR(20) NOT NULL,
+
+    original_url VARCHAR(2048) NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    expires_at TIMESTAMP NULL,
+
+    CONSTRAINT uk_url_mapping_short_code UNIQUE (short_code)
+);
 ```
 
-The current flow is:
+A Flyway migration adds the uniqueness constraint for original URLs:
 
-```text
-Every 60 seconds
-       ↓
-deleteExpiredUrls()
-       ↓
-BEGIN TRANSACTION
-       ↓
-DELETE expired URLs
-       ↓
-COMMIT
+```sql
+ALTER TABLE url_mapping
+ADD CONSTRAINT uk_url_mapping_original_url UNIQUE (original_url);
 ```
 
-If the database operation fails:
+This is maintained as a new migration rather than modifying an already-applied Flyway migration.
+
+---
+
+# Current Project Structure
 
 ```text
-BEGIN
+src/main/java/com/example/urlshortener
+│
+├── config
+│
+├── concurrency
+│
+├── controller
+│   └── UrlController
+│
+├── dto
+│   ├── ShortenUrlRequest
+│   └── ShortenUrlResponse
+│
+├── exception
+│   ├── GlobalExceptionHandler
+│   ├── RateLimitExceededException
+│   └── UrlNotFoundException
+│
+├── model
+│   └── UrlMapping
+│
+├── repository
+│   └── UrlRepository
+│
+├── scheduler
+│   └── UrlExpirationScheduler
+│
+└── service
+    ├── ShortCodeGenerator
+    └── UrlService
+```
+
+Database migrations:
+
+```text
+src/main/resources/db/migration
+│
+├── V1__create_url_mapping.sql
+└── V2__add_unique_constraint_to_original_url.sql
+```
+
+---
+
+# Current Request Flow
+
+## Creating a URL
+
+```text
+Client
   ↓
-DELETE
+POST /shorten
   ↓
-ERROR
+UrlController
   ↓
-ROLLBACK
+UrlService
+  ↓
+Check original URL
+  ↓
+Existing?
+ ┌───────┴───────┐
+ YES             NO
+ ↓                ↓
+Return existing   Generate short code
+short code        ↓
+                  Save to MySQL
+                      ↓
+                  Return response
 ```
 
 ---
 
-# 10. Expiration Design
-
-An important design decision was established:
-
-The scheduler is **not responsible for deciding whether a URL is valid**.
-
-The request itself checks:
+## Redirecting
 
 ```text
-expiresAt
+Client
+  ↓
+GET /{shortCode}
+  ↓
+UrlController
+  ↓
+UrlService
+  ↓
+UrlRepository
+  ↓
+Find short code
+  ↓
+Check expiration
+  ↓
+Return original URL
 ```
-
-Therefore:
-
-```text
-URL expires at 4:00 PM
-Scheduler runs at 4:01 PM
-```
-
-A request arriving at:
-
-```text
-4:00:30 PM
-```
-
-can still correctly determine that the URL has expired even though the scheduler has not deleted it yet.
-
-We therefore have two mechanisms:
-
-```text
-             URL expiration
-                   │
-          ┌────────┴────────┐
-          ↓                 ↓
-     Request check      Scheduler cleanup
-          │                 │
-          ↓                 ↓
-   Reject expired       Delete old rows
-```
-
-This separates **correctness** from **cleanup**.
 
 ---
 
-# 11. Current Concurrency Architecture
-
-The current architecture is:
+## Expiration Cleanup
 
 ```text
-                    HTTP Requests
-                         │
-             ┌───────────┴───────────┐
-             ↓                       ↓
-       POST /shortenUrl       GET /shortenUrl/{code}
-             │                       │
-             ↓                       ↓
-       UrlController            UrlController
-             │                       │
-             └───────────┬───────────┘
-                         ↓
-                     UrlService
-                         │
-              ┌──────────┴──────────┐
-              ↓                     ↓
-      ShortCodeGenerator      UrlRepository
-                                    │
-                                    ↓
-                                  MySQL
-                                    │
-                         UNIQUE(short_code)
-                                    ↑
-                                    │
-                         Expiration Scheduler
-```
-
-The design intentionally avoids unnecessary Java-level locking.
-
----
-
-# 12. Current Thread-Safety Status
-
-| Component                | Status                           | Reason                                  |
-| ------------------------ | -------------------------------- | --------------------------------------- |
-| `UrlController`          | ✅ Safe                           | No shared mutable request state         |
-| `UrlService`             | ✅ Safe                           | Stateless design                        |
-| `ShortCodeGenerator`     | ✅ Safe                           | `SecureRandom` + local `StringBuilder`  |
-| `UrlRepository`          | ✅ Safe                           | Spring Data JPA/database infrastructure |
-| `UrlMapping`             | ✅ Currently sufficient           | No concurrent updates yet               |
-| `UrlExpirationScheduler` | ✅ Improved                       | Transactional cleanup                   |
-| MySQL schema             | ✅ Safe for short-code uniqueness | `UNIQUE(short_code)`                    |
-
----
-
-# 13. What We Have NOT Covered Yet
-
-Today's work covers the **basic thread-safety layer**.
-
-Concurrency is not finished.
-
-The next stage will focus heavily on **database concurrency**.
-
-Topics to study:
-
-### Transactions
-
-```text
-BEGIN
-   ↓
-Operations
-   ↓
-COMMIT / ROLLBACK
-```
-
-### Isolation Levels
-
-```text
-READ UNCOMMITTED
-READ COMMITTED
-REPEATABLE READ
-SERIALIZABLE
-```
-
-### Race Conditions
-
-Including:
-
-* Lost updates
-* Dirty reads
-* Non-repeatable reads
-* Phantom reads
-
-### Locking
-
-```text
-Optimistic Locking
+Spring Boot Application
         ↓
-@Version
-```
-
-and:
-
-```text
-Pessimistic Locking
+UrlExpirationScheduler
         ↓
-Database row locks
-SELECT ... FOR UPDATE
+Find expired mappings
+        ↓
+Delete expired records
+        ↓
+MySQL
 ```
 
 ---
 
-# 14. Future Distributed Concurrency
+# Concurrency Design Principles
 
-After understanding database concurrency, the project will move toward distributed concurrency.
+The project currently follows these principles:
 
-The eventual architecture is expected to involve:
+### Database constraints over application assumptions
+
+Important uniqueness rules are enforced by MySQL rather than relying only on Java checks.
+
+### Stateless service design
+
+The service does not depend on mutable shared in-memory state for URL uniqueness.
+
+### No unnecessary `synchronized`
+
+The application does not use `synchronized` as the primary mechanism for protecting URL creation.
+
+This is important because the eventual architecture is intended to support multiple application instances.
 
 ```text
-                    Load Balancer
-                   /      |      \
-                  ↓       ↓       ↓
-             Instance A Instance B Instance C
-                  │       │       │
-                  └───────┼───────┘
-                          ↓
-                        Redis
-                          ↓
-                        MySQL
+Client
+  ↓
+Load Balancer
+  ↓
+┌─────────────┬─────────────┬─────────────┐
+│ Spring Boot │ Spring Boot │ Spring Boot │
+│ Instance 1  │ Instance 2  │ Instance 3  │
+└─────────────┴─────────────┴─────────────┘
+             ↓
+           MySQL
 ```
 
-Future topics include:
+A JVM-level lock would not protect requests across different application instances, while a database constraint can.
 
-* Redis atomic operations
-* Distributed locks
-* Idempotency
-* Race conditions across multiple application instances
-* Cache consistency
+---
+
+# Current Concurrency Progress
+
+Completed:
+
+* Concurrent request awareness
+* Database uniqueness for `short_code`
+* Short-code collision retry mechanism
+* Duplicate original URL detection
+* Database uniqueness for `original_url`
+* Concurrent duplicate URL protection
+* Stateless URL creation design
+* Expiration timestamp validation
+* Automatic expiration cleanup
+* Scheduler-based cleanup
+
+---
+
+# Next Concurrency Work
+
+The next stage focuses specifically on deeper database and distributed concurrency concepts:
+
+1. Transactions
+2. Transaction boundaries
+3. Isolation levels
+4. Race conditions
+5. Concurrent request testing
+6. Optimistic locking
+7. Pessimistic locking
+8. Database concurrency behavior
+9. Multi-instance/distributed concurrency
+10. Load balancing considerations
+
+After the concurrency layer is understood and tested, the project can progress toward:
+
+* Redis caching
 * Rate limiting
-* Database contention
+* Docker
 * Horizontal scaling
-* Replication
-* Read/write separation
-* Eventual consistency
+* Load balancing
+* Database replication
+* Database sharding
+* Distributed-system design
 
 ---
 
-# Today's Key Takeaways
+# Project Goal
 
-### 1. Thread safety does not mean using `synchronized` everywhere.
+The goal is not just to build a basic URL shortener.
 
-### 2. Stateless Spring beans are naturally easier to make thread-safe.
+The project is being developed as a learning exercise for designing a **production-style distributed backend system**, with particular attention to:
 
-### 3. Database constraints are essential for concurrency.
+* Concurrency
+* Thread safety
+* Database consistency
+* Scalability
+* Caching
+* Fault tolerance
+* Distributed systems
+* Performance
+* Clean architecture
 
-### 4. `UNIQUE(short_code)` is our authoritative protection against duplicate short codes.
-
-### 5. A database constraint + retry is better than globally locking short-code generation.
-
-### 6. `SecureRandom` is safe for concurrent use.
-
-### 7. Local variables such as `StringBuilder` do not create shared-state problems.
-
-### 8. `@Version` is useful for concurrent updates, but our current URL lifecycle doesn't require it yet.
-
-### 9. Expiration validation happens during the request; the scheduler performs cleanup.
-
-### 10. Java-level synchronization does not solve distributed concurrency.
-
----
-
-# Next Session
-
-**Focus: Database Concurrency**
-
-We will continue with concurrency only.
-
-Planned order:
-
-```text
-Java Threads
-     ↓
-Race Conditions
-     ↓
-Transactions
-     ↓
-Isolation Levels
-     ↓
-Lost Updates
-     ↓
-Optimistic Locking
-     ↓
-Pessimistic Locking
-     ↓
-Concurrent Testing
-     ↓
-Distributed Concurrency
-```
-
-The goal is to understand **why each mechanism is needed** and then implement only the mechanisms that our URL Shortener actually requires.
+The implementation is intentionally being built **one component at a time** so that each design decision and concurrency mechanism is understood before moving to the next stage.
