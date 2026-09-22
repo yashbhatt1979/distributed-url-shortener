@@ -37,6 +37,15 @@ public class GlobalExceptionHandler {
                 .body(Map.of("error", ex.getMessage()));
     }
 
+    @ExceptionHandler(DistributedLockException.class)
+    public ResponseEntity<Map<String, String>> handleDistributedLockException(
+            DistributedLockException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.LOCKED)
+                .body(Map.of("error", ex.getMessage()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, String>> handleGenericException(
             Exception ex) {

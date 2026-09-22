@@ -5,7 +5,9 @@ import java.time.LocalDateTime;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import com.example.urlshortener.concurrency.UrlHashGenerator;
 import com.example.urlshortener.dto.ShortenUrlRequest;
 import com.example.urlshortener.dto.ShortenUrlResponse;
 import com.example.urlshortener.exception.UrlNotFoundException;
@@ -19,112 +21,107 @@ public class UrlService {
 
     private final UrlRepository urlRepository;
     private final ShortCodeGenerator shortCodeGenerator;
-    private final long expirationHours;
+    private final UrlHashGenerator urlHashGenerator;
+    private final int expirationHours;
 
     public UrlService(
             UrlRepository urlRepository,
             ShortCodeGenerator shortCodeGenerator,
-            @Value("${app.url-expiration-hours}") long expirationHours) {
+            UrlHashGenerator urlHashGenerator,
+            @Value("${app.url-expiration-hours}") int expirationHours) {
 
         this.urlRepository = urlRepository;
         this.shortCodeGenerator = shortCodeGenerator;
+        this.urlHashGenerator = urlHashGenerator;
         this.expirationHours = expirationHours;
     }
 
+    @Transactional
     public ShortenUrlResponse shortenUrl(ShortenUrlRequest request) {
 
+        String originalUrl = request.getOriginalUrl();
+
+        String originalUrlHash =
+                urlHashGenerator.generateHash(originalUrl);
+
         /*
-         * First check whether this original URL already exists.
+         * First check whether this URL already exists.
          */
-        var existingUrl = urlRepository.findByOriginalUrl(
-                request.getOriginalUrl()
-        );
+        var existingMapping =
+                urlRepository.findByOriginalUrlHash(originalUrlHash);
 
-        if (existingUrl.isPresent()) {
+        if (existingMapping.isPresent()) {
 
-            UrlMapping urlMapping = existingUrl.get();
+            UrlMapping existing = existingMapping.get();
 
-            /*
-             * If the existing short URL has not expired,
-             * return the existing short code.
-             *
-             * No new database row is created.
-             */
-            if (urlMapping.getExpiresAt() != null &&
-                    LocalDateTime.now().isBefore(urlMapping.getExpiresAt())) {
-
-                return new ShortenUrlResponse(
-                        urlMapping.getShortCode(),
-                        urlMapping.getOriginalUrl(),
-                        "URL already shortened. Returning existing short code."
-                );
-            }
-
-            /*
-             * If the existing URL has expired, remove it.
-             * A new short code can then be generated.
-             */
-            urlRepository.delete(urlMapping);
+            return new ShortenUrlResponse(
+                    existing.getShortCode(),
+                    existing.getOriginalUrl(),
+                    "URL already exists. Returning existing short URL."
+            );
         }
 
         /*
          * Generate a new short code.
          */
-        for (int attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+        for (int attempt = 0;
+             attempt < MAX_GENERATION_ATTEMPTS;
+             attempt++) {
 
-            String shortCode = shortCodeGenerator.generateShortCode();
+            String shortCode =
+                    shortCodeGenerator.generateShortCode();
 
-            LocalDateTime expiresAt =
-                    LocalDateTime.now().plusHours(expirationHours);
+            UrlMapping urlMapping =
+                    new UrlMapping(originalUrl, shortCode);
 
-            UrlMapping urlMapping = new UrlMapping();
+            urlMapping.setOriginalUrlHash(originalUrlHash);
 
-            urlMapping.setOriginalUrl(request.getOriginalUrl());
-            urlMapping.setShortCode(shortCode);
-            urlMapping.setExpiresAt(expiresAt);
+            urlMapping.setExpiresAt(
+                    LocalDateTime.now().plusHours(expirationHours)
+            );
 
             try {
 
-                UrlMapping savedUrl = urlRepository.save(urlMapping);
+                UrlMapping saved =
+                        urlRepository.saveAndFlush(urlMapping);
 
                 return new ShortenUrlResponse(
-                        savedUrl.getShortCode(),
-                        savedUrl.getOriginalUrl(),
+                        saved.getShortCode(),
+                        saved.getOriginalUrl(),
                         "URL shortened successfully."
                 );
 
-            } catch (DataIntegrityViolationException ex) {
+            } catch (DataIntegrityViolationException e) {
 
                 /*
-                 * Another concurrent request may have inserted
-                 * the same original URL or the same short code.
+                 * Another request may have inserted the same
+                 * original URL between our SELECT and INSERT.
                  *
-                 * Check whether the original URL now exists.
+                 * The database UNIQUE constraint on
+                 * original_url_hash protects us here.
                  */
-                var concurrentUrl = urlRepository.findByOriginalUrl(
-                        request.getOriginalUrl()
-                );
+                var concurrentMapping =
+                        urlRepository.findByOriginalUrlHash(
+                                originalUrlHash
+                        );
 
-                if (concurrentUrl.isPresent()) {
+                if (concurrentMapping.isPresent()) {
+
+                    UrlMapping existing =
+                            concurrentMapping.get();
 
                     return new ShortenUrlResponse(
-                            concurrentUrl.get().getShortCode(),
-                            concurrentUrl.get().getOriginalUrl(),
-                            "URL already shortened. Returning existing short code."
+                            existing.getShortCode(),
+                            existing.getOriginalUrl(),
+                            "URL was created by another request. Returning existing short URL."
                     );
                 }
 
                 /*
-                 * If the failure was caused by a short-code collision,
-                 * generate another short code and try again.
+                 * If the DataIntegrityViolationException was
+                 * caused by a short-code collision instead,
+                 * generate another short code.
                  */
-                if (attempt == MAX_GENERATION_ATTEMPTS) {
-
-                    throw new IllegalStateException(
-                            "Unable to generate a unique short code",
-                            ex
-                    );
-                }
             }
         }
 
@@ -135,20 +132,13 @@ public class UrlService {
 
     public String getOriginalUrl(String shortCode) {
 
-        UrlMapping urlMapping = urlRepository.findByShortCode(shortCode)
-                .orElseThrow(() ->
-                        new UrlNotFoundException(
-                                "Short URL not found: " + shortCode
-                        )
-                );
-
-        if (urlMapping.getExpiresAt() != null &&
-                !LocalDateTime.now().isBefore(urlMapping.getExpiresAt())) {
-
-            throw new UrlNotFoundException(
-                    "Short URL has expired: " + shortCode
-            );
-        }
+        UrlMapping urlMapping =
+                urlRepository.findByShortCode(shortCode)
+                        .orElseThrow(
+                                () -> new UrlNotFoundException(
+                                        "Short URL not found"
+                                )
+                        );
 
         return urlMapping.getOriginalUrl();
     }

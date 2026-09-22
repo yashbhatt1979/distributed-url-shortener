@@ -1,534 +1,402 @@
 # Distributed URL Shortener
 
-A backend URL-shortening service built with **Java 17, Spring Boot, Maven, and MySQL**, designed with concurrency, thread safety, expiration, and future distributed-system scalability in mind.
-
-The project is being developed step-by-step to understand how a production-style URL shortener handles **concurrent requests, duplicate data, database constraints, expiration, caching, rate limiting, and horizontal scaling**.
+A scalable and concurrency-aware URL Shortener built with **Java 17, Spring Boot, MySQL, Redis, Maven, and Flyway**.
 
 ---
 
-## Tech Stack
+## Today's Progress
 
-* **Java 17**
-* **Spring Boot**
-* **Maven**
-* **Spring Data JPA / Hibernate**
-* **MySQL**
-* **Flyway**
-* **REST API**
-* **Git & GitHub**
+Today's work focused on strengthening the project against **concurrent requests** and preparing the system for distributed execution.
 
----
+### 1. Database Concurrency
 
-## Current Features
+Implemented database-level protection against duplicate original URLs.
 
-### 1. URL Shortening
-
-Clients can submit an original URL through:
-
-```http
-POST /shorten
-```
-
-The service generates a short code and stores the mapping in MySQL.
-
-Basic flow:
+Added:
 
 ```text
-POST /shorten
-      ↓
-UrlController
-      ↓
-UrlService
-      ↓
-UrlRepository
-      ↓
-MySQL
+original_url_hash
 ```
 
----
+to the `url_mapping` table.
 
-### 2. Short URL Redirection
+The hash is generated using **SHA-256**.
 
-A short code can be used to retrieve the original URL.
-
-```http
-GET /{shortCode}
-```
-
-The service:
-
-1. Searches for the short code.
-2. Checks whether the mapping exists.
-3. Checks whether the URL has expired.
-4. Returns the original URL when valid.
-
----
-
-### 3. URL Expiration
-
-Each generated short URL has a **4-hour expiration time**.
-
-The expiration timestamp is stored in:
+The database now contains a unique constraint:
 
 ```text
-expires_at
+uk_url_mapping_original_url_hash
 ```
 
-The expiration time is calculated when the URL is created:
+This ensures that two requests cannot create multiple database records for the same original URL.
 
-```java
-LocalDateTime.now().plusHours(expirationHours)
-```
+### Why this matters
 
-The expiration period is configurable through:
-
-```properties
-app.url-expiration-hours=4
-```
-
----
-
-### 4. Automatic Expiration Cleanup
-
-The project contains:
+Consider two requests arriving simultaneously:
 
 ```text
-UrlExpirationScheduler
+Request A ──┐
+            ├──> Check database
+Request B ──┘
 ```
 
-The scheduler periodically removes expired URL mappings from the database.
+Both requests could potentially see that the URL does not exist.
 
-Important distinction:
+The database unique constraint provides the final protection:
 
 ```text
-Scheduler
-   ↓
-Cleans expired records from DB
-```
-
-while request-time validation:
-
-```text
-GET /{shortCode}
-   ↓
-Check expiresAt
-   ↓
-Reject expired URL
-```
-
-provides immediate protection even before the scheduler removes the record.
-
-The scheduler runs only while the Spring Boot application is running.
-
----
-
-# Concurrency & Thread Safety
-
-Concurrency is a major design focus of this project.
-
-Spring Boot can process multiple HTTP requests concurrently, so the application must correctly handle multiple requests accessing the same data at the same time.
-
----
-
-## 5. Short Code Collision Protection
-
-Short codes are generated dynamically.
-
-Multiple requests could theoretically generate the same short code.
-
-The database therefore enforces:
-
-```text
-UNIQUE(short_code)
-```
-
-This provides a database-level guarantee that two URL mappings cannot have the same short code.
-
-The service also retries short-code generation when a database uniqueness violation occurs.
-
-Maximum generation attempts:
-
-```java
-MAX_GENERATION_ATTEMPTS = 5
-```
-
-Flow:
-
-```text
-Generate short code
+Same Original URL
        ↓
-Save to database
+Same SHA-256 Hash
        ↓
-Unique?
-  ↓          ↓
- YES         NO
-  ↓           ↓
-Success    Generate another code
-             ↓
-           Retry
+UNIQUE constraint
+       ↓
+Only one database record
 ```
 
 ---
 
-# Duplicate Original URL Protection
+## 2. SHA-256 URL Hashing
 
-## 6. Same URL → Same Short Code
-
-The service prevents multiple database records from being created for the same original URL.
-
-For example:
-
-```text
-POST https://example.com
-```
-
-First request:
-
-```text
-https://example.com → Ab12Cd
-```
-
-A repeated request for the same URL returns:
-
-```text
-https://example.com → Ab12Cd
-```
-
-instead of generating another short code.
-
-The database also enforces:
-
-```text
-UNIQUE(original_url)
-```
-
-This gives the system two important database-level guarantees:
-
-```text
-short_code    → UNIQUE
-original_url  → UNIQUE
-```
-
----
-
-## Duplicate URL Request Flow
-
-```text
-POST /shorten
-       ↓
-Check original_url
-       ↓
-Does it already exist?
-       │
-   ┌───┴───┐
-   │       │
-  YES      NO
-   │       │
-   ↓       ↓
-Return    Generate
-existing  short code
-code       │
-   │        ↓
-   │      INSERT
-   │        │
-   └────────┴──→ Response
-```
-
-When the URL already exists and has not expired:
-
-```text
-No new database row is created.
-```
-
-The API returns a message indicating that the existing short code is being returned.
+Added support for generating a deterministic hash of the original URL.
 
 Example:
 
-```json
-{
-    "shortCode": "Ab12Cd",
-    "originalUrl": "https://example.com",
-    "message": "URL already shortened. Returning existing short code."
-}
+```text
+Original URL
+     ↓
+SHA-256
+     ↓
+64-character hexadecimal hash
 ```
+
+The hash is stored in:
+
+```text
+original_url_hash
+```
+
+### Why use a hash?
+
+* Same URL produces the same hash.
+* SHA-256 produces a fixed 256-bit result.
+* The hexadecimal representation is 64 characters.
+* It provides a deterministic identifier for duplicate detection.
+* It works well with a database UNIQUE constraint.
+
+The original URL is still stored separately.
 
 ---
 
-# Concurrent Duplicate Requests
+## 3. Flyway V2 Migration
 
-A simple application-level check is not sufficient by itself.
-
-For example, two requests could arrive simultaneously:
+Created:
 
 ```text
-Request A                    Request B
-    ↓                            ↓
-Check URL                  Check URL
-    ↓                            ↓
-Not found                  Not found
-    ↓                            ↓
-Generate code              Generate code
+V2__add_database_concurrency_constraints.sql
 ```
 
-Both requests could believe that the URL does not exist.
-
-Therefore, the database constraint is the final protection:
-
-```text
-UNIQUE(original_url)
-```
-
-Only one database row can exist for a particular original URL.
-
-The service handles the resulting `DataIntegrityViolationException` and checks whether another concurrent request has already created the mapping.
-
-This provides protection at two levels:
-
-```text
-Application Level
-       +
-Database Level
-```
-
----
-
-# Database Design
-
-Current `url_mapping` table:
-
-```sql
-CREATE TABLE url_mapping (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-
-    short_code VARCHAR(20) NOT NULL,
-
-    original_url VARCHAR(2048) NOT NULL,
-
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    expires_at TIMESTAMP NULL,
-
-    CONSTRAINT uk_url_mapping_short_code UNIQUE (short_code)
-);
-```
-
-A Flyway migration adds the uniqueness constraint for original URLs:
+The migration:
 
 ```sql
 ALTER TABLE url_mapping
-ADD CONSTRAINT uk_url_mapping_original_url UNIQUE (original_url);
+ADD COLUMN original_url_hash VARCHAR(64);
+
+UPDATE url_mapping
+SET original_url_hash = SHA2(original_url, 256);
+
+ALTER TABLE url_mapping
+MODIFY COLUMN original_url_hash VARCHAR(64) NOT NULL;
+
+ALTER TABLE url_mapping
+ADD CONSTRAINT uk_url_mapping_original_url_hash
+UNIQUE (original_url_hash);
 ```
 
-This is maintained as a new migration rather than modifying an already-applied Flyway migration.
+The migration was initially marked as failed by Flyway.
 
----
+We investigated the failure, confirmed that the database had not been partially modified, repaired the Flyway migration history, and successfully reran the application.
 
-# Current Project Structure
-
-```text
-src/main/java/com/example/urlshortener
-│
-├── config
-│
-├── concurrency
-│
-├── controller
-│   └── UrlController
-│
-├── dto
-│   ├── ShortenUrlRequest
-│   └── ShortenUrlResponse
-│
-├── exception
-│   ├── GlobalExceptionHandler
-│   ├── RateLimitExceededException
-│   └── UrlNotFoundException
-│
-├── model
-│   └── UrlMapping
-│
-├── repository
-│   └── UrlRepository
-│
-├── scheduler
-│   └── UrlExpirationScheduler
-│
-└── service
-    ├── ShortCodeGenerator
-    └── UrlService
-```
-
-Database migrations:
+### Current Flyway state
 
 ```text
-src/main/resources/db/migration
-│
-├── V1__create_url_mapping.sql
-└── V2__add_unique_constraint_to_original_url.sql
+V1 → create url mapping                  → SUCCESS
+V2 → add database concurrency constraints → SUCCESS
 ```
 
 ---
 
-# Current Request Flow
+## 4. Distributed Concurrency Foundations
 
-## Creating a URL
+Redis is already configured in the project.
 
-```text
-Client
-  ↓
-POST /shorten
-  ↓
-UrlController
-  ↓
-UrlService
-  ↓
-Check original URL
-  ↓
-Existing?
- ┌───────┴───────┐
- YES             NO
- ↓                ↓
-Return existing   Generate short code
-short code        ↓
-                  Save to MySQL
-                      ↓
-                  Return response
+Current configuration includes:
+
+```properties
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+
+app.distributed-lock.expiration-seconds=10
 ```
 
----
-
-## Redirecting
+The project also contains:
 
 ```text
-Client
-  ↓
-GET /{shortCode}
-  ↓
-UrlController
-  ↓
-UrlService
-  ↓
-UrlRepository
-  ↓
-Find short code
-  ↓
-Check expiration
-  ↓
-Return original URL
+concurrency/
+└── UrlCreationLock.java
 ```
 
----
+`UrlCreationLock` is intended to provide a **distributed lock** for URL creation.
 
-## Expiration Cleanup
+It is different from the database constraint.
+
+### Redis Distributed Lock
+
+Coordinates concurrent requests across multiple application instances:
 
 ```text
-Spring Boot Application
-        ↓
-UrlExpirationScheduler
-        ↓
-Find expired mappings
-        ↓
-Delete expired records
-        ↓
+             Redis
+            /     \
+           /       \
+    Instance 1   Instance 2
+           \       /
+            \     /
+             MySQL
+```
+
+### Database Constraint
+
+Provides final database-level correctness:
+
+```text
+Application
+     ↓
 MySQL
+     ↓
+UNIQUE(original_url_hash)
+```
+
+Together:
+
+```text
+Redis Lock
+    ↓
+Coordinate concurrent creation
+    ↓
+Database
+    ↓
+UNIQUE constraint
+    ↓
+Guarantee data integrity
+```
+
+`UrlCreationLock` is **not deleted**. It will be completed and properly integrated/tested as part of the distributed concurrency implementation.
+
+---
+
+## 5. Important Concurrency Components
+
+| Component                          | Responsibility                          | Status      |
+| ---------------------------------- | --------------------------------------- | ----------- |
+| `UrlHashGenerator`                 | Generate deterministic SHA-256 URL hash | Implemented |
+| `UrlCreationLock`                  | Redis distributed locking               | In progress |
+| `original_url_hash`                | Store URL fingerprint                   | Implemented |
+| `uk_url_mapping_original_url_hash` | Prevent duplicate original URLs         | Implemented |
+| Flyway V2                          | Database concurrency migration          | Completed   |
+| Redis                              | Distributed coordination infrastructure | Configured  |
+
+---
+
+## Current Architecture
+
+```text
+                   Client
+                     |
+                     v
+              UrlController
+                     |
+                     v
+                UrlService
+                     |
+          +----------+----------+
+          |                     |
+          v                     v
+ UrlHashGenerator        UrlCreationLock
+          |                     |
+          |                   Redis
+          |                     |
+          +----------+----------+
+                     |
+                     v
+                  MySQL
+                     |
+          UNIQUE(original_url_hash)
 ```
 
 ---
 
-# Concurrency Design Principles
+# Project Technology Stack
 
-The project currently follows these principles:
+* Java 17
+* Spring Boot
+* Spring MVC
+* Spring Data JPA
+* Hibernate
+* MySQL
+* Redis
+* Flyway
+* Maven
+* Bucket4j
+* Spring Boot Actuator
+* Git / GitHub
 
-### Database constraints over application assumptions
+---
 
-Important uniqueness rules are enforced by MySQL rather than relying only on Java checks.
+# Database Schema
 
-### Stateless service design
+Current `url_mapping` table:
 
-The service does not depend on mutable shared in-memory state for URL uniqueness.
+```text
+url_mapping
+├── id
+├── short_code
+├── original_url
+├── original_url_hash
+├── created_at
+└── expires_at
+```
 
-### No unnecessary `synchronized`
+Important constraints:
 
-The application does not use `synchronized` as the primary mechanism for protecting URL creation.
+```text
+PRIMARY KEY(id)
 
-This is important because the eventual architecture is intended to support multiple application instances.
+UNIQUE(short_code)
+
+UNIQUE(original_url_hash)
+```
+
+---
+
+# Concurrency Strategy
+
+The project is being designed with multiple layers of concurrency protection.
+
+### Layer 1 — Application Coordination
+
+Redis distributed lock:
+
+```text
+UrlCreationLock
+```
+
+### Layer 2 — Database Integrity
+
+MySQL unique constraint:
+
+```text
+uk_url_mapping_original_url_hash
+```
+
+### Layer 3 — Exception Handling
+
+Database constraint violations are handled by the application so concurrent requests do not result in uncontrolled failures.
+
+---
+
+# Next Step
+
+## Caching — Tomorrow
+
+The next major feature will be **Redis caching**.
+
+Planned flow:
 
 ```text
 Client
-  ↓
-Load Balancer
-  ↓
-┌─────────────┬─────────────┬─────────────┐
-│ Spring Boot │ Spring Boot │ Spring Boot │
-│ Instance 1  │ Instance 2  │ Instance 3  │
-└─────────────┴─────────────┴─────────────┘
-             ↓
-           MySQL
+  |
+  v
+GET /shortCode
+  |
+  v
+Check Redis Cache
+  |
+  +---- Cache Hit ----> Return Original URL
+  |
+  +---- Cache Miss
+          |
+          v
+        MySQL
+          |
+          v
+      Store in Redis
+          |
+          v
+      Return URL
 ```
 
-A JVM-level lock would not protect requests across different application instances, while a database constraint can.
+Topics to cover:
+
+1. Why caching is needed
+2. Cache-aside pattern
+3. Redis data structures
+4. Cache keys and values
+5. TTL
+6. Cache hit vs cache miss
+7. Integrating Spring Cache
+8. Redis caching in the URL shortener
+9. Cache invalidation
+10. Interaction between caching and URL expiration
+11. Testing cache behavior
+12. Caching considerations in a distributed system
 
 ---
 
-# Current Concurrency Progress
+## Current Status
 
-Completed:
+### Completed
 
-* Concurrent request awareness
-* Database uniqueness for `short_code`
-* Short-code collision retry mechanism
-* Duplicate original URL detection
-* Database uniqueness for `original_url`
-* Concurrent duplicate URL protection
-* Stateless URL creation design
-* Expiration timestamp validation
-* Automatic expiration cleanup
-* Scheduler-based cleanup
-
----
-
-# Next Concurrency Work
-
-The next stage focuses specifically on deeper database and distributed concurrency concepts:
-
-1. Transactions
-2. Transaction boundaries
-3. Isolation levels
-4. Race conditions
-5. Concurrent request testing
-6. Optimistic locking
-7. Pessimistic locking
-8. Database concurrency behavior
-9. Multi-instance/distributed concurrency
-10. Load balancing considerations
-
-After the concurrency layer is understood and tested, the project can progress toward:
-
-* Redis caching
+* URL shortening
+* URL redirection
+* URL expiration
+* Scheduled expiration cleanup
 * Rate limiting
-* Docker
-* Horizontal scaling
-* Load balancing
-* Database replication
-* Database sharding
-* Distributed-system design
+* MySQL persistence
+* Flyway migrations
+* Database concurrency protection
+* SHA-256 URL hashing
+* Redis configuration
+* Distributed concurrency foundation
+
+### In Progress
+
+* Completing and testing `UrlCreationLock`
+* Distributed concurrency testing
+
+### Next
+
+* **Redis Caching**
 
 ---
 
-# Project Goal
+## Development Principle
 
-The goal is not just to build a basic URL shortener.
+The project is being developed progressively:
 
-The project is being developed as a learning exercise for designing a **production-style distributed backend system**, with particular attention to:
+```text
+Basic URL Shortener
+        ↓
+Database
+        ↓
+Concurrency
+        ↓
+Distributed Concurrency
+        ↓
+Caching
+        ↓
+Scalability
+        ↓
+Production-oriented Distributed System
+```
 
-* Concurrency
-* Thread safety
-* Database consistency
-* Scalability
-* Caching
-* Fault tolerance
-* Distributed systems
-* Performance
-* Clean architecture
-
-The implementation is intentionally being built **one component at a time** so that each design decision and concurrency mechanism is understood before moving to the next stage.
+The goal is not just to make the URL shortener work, but to understand **why each distributed-system component is needed and what problem it solves**.

@@ -19,8 +19,8 @@ import jakarta.persistence.UniqueConstraint;
                         columnNames = "short_code"
                 ),
                 @UniqueConstraint(
-                        name = "uk_original_url",
-                        columnNames = "original_url"
+                        name = "uk_url_mapping_original_url_hash",
+                        columnNames = "original_url_hash"
                 )
         }
 )
@@ -30,10 +30,25 @@ public class UrlMapping {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "original_url", nullable = false, length = 2048)
+    @Column(
+            name = "original_url",
+            nullable = false,
+            length = 2048
+    )
     private String originalUrl;
 
-    @Column(name = "short_code", nullable = false, unique = true, length = 8)
+    @Column(
+            name = "original_url_hash",
+            nullable = false,
+            length = 64
+    )
+    private String originalUrlHash;
+
+    @Column(
+            name = "short_code",
+            nullable = false,
+            length = 20
+    )
     private String shortCode;
 
     @Column(name = "expires_at")
@@ -57,6 +72,14 @@ public class UrlMapping {
 
     public void setOriginalUrl(String originalUrl) {
         this.originalUrl = originalUrl;
+    }
+
+    public String getOriginalUrlHash() {
+        return originalUrlHash;
+    }
+
+    public void setOriginalUrlHash(String originalUrlHash) {
+        this.originalUrlHash = originalUrlHash;
     }
 
     public String getShortCode() {
