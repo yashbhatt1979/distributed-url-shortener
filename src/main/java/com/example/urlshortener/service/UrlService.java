@@ -1,5 +1,6 @@
 package com.example.urlshortener.service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -7,6 +8,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.example.urlshortener.cache.UrlCacheService;
 import com.example.urlshortener.concurrency.UrlHashGenerator;
 import com.example.urlshortener.dto.ShortenUrlRequest;
 import com.example.urlshortener.dto.ShortenUrlResponse;
@@ -22,17 +24,20 @@ public class UrlService {
     private final UrlRepository urlRepository;
     private final ShortCodeGenerator shortCodeGenerator;
     private final UrlHashGenerator urlHashGenerator;
+    private final UrlCacheService urlCacheService;
     private final int expirationHours;
 
     public UrlService(
             UrlRepository urlRepository,
             ShortCodeGenerator shortCodeGenerator,
             UrlHashGenerator urlHashGenerator,
+            UrlCacheService urlCacheService,
             @Value("${app.url-expiration-hours}") int expirationHours) {
 
         this.urlRepository = urlRepository;
         this.shortCodeGenerator = shortCodeGenerator;
         this.urlHashGenerator = urlHashGenerator;
+        this.urlCacheService = urlCacheService;
         this.expirationHours = expirationHours;
     }
 
@@ -132,6 +137,21 @@ public class UrlService {
 
     public String getOriginalUrl(String shortCode) {
 
+        /*
+         * 1. Check Redis cache first.
+         */
+        String cachedUrl =
+                urlCacheService.get(shortCode);
+
+        if (cachedUrl != null) {
+
+            return cachedUrl;
+        }
+
+        /*
+         * 2. Cache miss.
+         *    Query MySQL.
+         */
         UrlMapping urlMapping =
                 urlRepository.findByShortCode(shortCode)
                         .orElseThrow(
@@ -140,6 +160,18 @@ public class UrlService {
                                 )
                         );
 
+        /*
+         * 3. Store the URL in Redis.
+         */
+        urlCacheService.put(
+                shortCode,
+                urlMapping.getOriginalUrl(),
+                Duration.ofHours(expirationHours)
+        );
+
+        /*
+         * 4. Return the original URL.
+         */
         return urlMapping.getOriginalUrl();
     }
 }

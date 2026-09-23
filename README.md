@@ -1,402 +1,622 @@
-# Distributed URL Shortener
+# 🚀 Distributed URL Shortener — Redis Caching & Dockerization
 
-A scalable and concurrency-aware URL Shortener built with **Java 17, Spring Boot, MySQL, Redis, Maven, and Flyway**.
+## 📅 Work Completed — 23 September 2026
 
----
-
-## Today's Progress
-
-Today's work focused on strengthening the project against **concurrent requests** and preparing the system for distributed execution.
-
-### 1. Database Concurrency
-
-Implemented database-level protection against duplicate original URLs.
-
-Added:
-
-```text
-original_url_hash
-```
-
-to the `url_mapping` table.
-
-The hash is generated using **SHA-256**.
-
-The database now contains a unique constraint:
-
-```text
-uk_url_mapping_original_url_hash
-```
-
-This ensures that two requests cannot create multiple database records for the same original URL.
-
-### Why this matters
-
-Consider two requests arriving simultaneously:
-
-```text
-Request A ──┐
-            ├──> Check database
-Request B ──┘
-```
-
-Both requests could potentially see that the URL does not exist.
-
-The database unique constraint provides the final protection:
-
-```text
-Same Original URL
-       ↓
-Same SHA-256 Hash
-       ↓
-UNIQUE constraint
-       ↓
-Only one database record
-```
+Today, the URL Shortener project was extended with **Redis caching** and fully **dockerized** so that the application, MySQL database, and Redis can run together as containers.
 
 ---
 
-## 2. SHA-256 URL Hashing
+# 🔴 1. Redis Caching
 
-Added support for generating a deterministic hash of the original URL.
+Redis was integrated into the URL Shortener to improve the performance of URL redirection.
 
-Example:
+### Why Redis?
 
-```text
-Original URL
-     ↓
-SHA-256
-     ↓
-64-character hexadecimal hash
-```
-
-The hash is stored in:
-
-```text
-original_url_hash
-```
-
-### Why use a hash?
-
-* Same URL produces the same hash.
-* SHA-256 produces a fixed 256-bit result.
-* The hexadecimal representation is 64 characters.
-* It provides a deterministic identifier for duplicate detection.
-* It works well with a database UNIQUE constraint.
-
-The original URL is still stored separately.
-
----
-
-## 3. Flyway V2 Migration
-
-Created:
-
-```text
-V2__add_database_concurrency_constraints.sql
-```
-
-The migration:
-
-```sql
-ALTER TABLE url_mapping
-ADD COLUMN original_url_hash VARCHAR(64);
-
-UPDATE url_mapping
-SET original_url_hash = SHA2(original_url, 256);
-
-ALTER TABLE url_mapping
-MODIFY COLUMN original_url_hash VARCHAR(64) NOT NULL;
-
-ALTER TABLE url_mapping
-ADD CONSTRAINT uk_url_mapping_original_url_hash
-UNIQUE (original_url_hash);
-```
-
-The migration was initially marked as failed by Flyway.
-
-We investigated the failure, confirmed that the database had not been partially modified, repaired the Flyway migration history, and successfully reran the application.
-
-### Current Flyway state
-
-```text
-V1 → create url mapping                  → SUCCESS
-V2 → add database concurrency constraints → SUCCESS
-```
-
----
-
-## 4. Distributed Concurrency Foundations
-
-Redis is already configured in the project.
-
-Current configuration includes:
-
-```properties
-spring.data.redis.host=localhost
-spring.data.redis.port=6379
-
-app.distributed-lock.expiration-seconds=10
-```
-
-The project also contains:
-
-```text
-concurrency/
-└── UrlCreationLock.java
-```
-
-`UrlCreationLock` is intended to provide a **distributed lock** for URL creation.
-
-It is different from the database constraint.
-
-### Redis Distributed Lock
-
-Coordinates concurrent requests across multiple application instances:
-
-```text
-             Redis
-            /     \
-           /       \
-    Instance 1   Instance 2
-           \       /
-            \     /
-             MySQL
-```
-
-### Database Constraint
-
-Provides final database-level correctness:
-
-```text
-Application
-     ↓
-MySQL
-     ↓
-UNIQUE(original_url_hash)
-```
-
-Together:
-
-```text
-Redis Lock
-    ↓
-Coordinate concurrent creation
-    ↓
-Database
-    ↓
-UNIQUE constraint
-    ↓
-Guarantee data integrity
-```
-
-`UrlCreationLock` is **not deleted**. It will be completed and properly integrated/tested as part of the distributed concurrency implementation.
-
----
-
-## 5. Important Concurrency Components
-
-| Component                          | Responsibility                          | Status      |
-| ---------------------------------- | --------------------------------------- | ----------- |
-| `UrlHashGenerator`                 | Generate deterministic SHA-256 URL hash | Implemented |
-| `UrlCreationLock`                  | Redis distributed locking               | In progress |
-| `original_url_hash`                | Store URL fingerprint                   | Implemented |
-| `uk_url_mapping_original_url_hash` | Prevent duplicate original URLs         | Implemented |
-| Flyway V2                          | Database concurrency migration          | Completed   |
-| Redis                              | Distributed coordination infrastructure | Configured  |
-
----
-
-## Current Architecture
-
-```text
-                   Client
-                     |
-                     v
-              UrlController
-                     |
-                     v
-                UrlService
-                     |
-          +----------+----------+
-          |                     |
-          v                     v
- UrlHashGenerator        UrlCreationLock
-          |                     |
-          |                   Redis
-          |                     |
-          +----------+----------+
-                     |
-                     v
-                  MySQL
-                     |
-          UNIQUE(original_url_hash)
-```
-
----
-
-# Project Technology Stack
-
-* Java 17
-* Spring Boot
-* Spring MVC
-* Spring Data JPA
-* Hibernate
-* MySQL
-* Redis
-* Flyway
-* Maven
-* Bucket4j
-* Spring Boot Actuator
-* Git / GitHub
-
----
-
-# Database Schema
-
-Current `url_mapping` table:
-
-```text
-url_mapping
-├── id
-├── short_code
-├── original_url
-├── original_url_hash
-├── created_at
-└── expires_at
-```
-
-Important constraints:
-
-```text
-PRIMARY KEY(id)
-
-UNIQUE(short_code)
-
-UNIQUE(original_url_hash)
-```
-
----
-
-# Concurrency Strategy
-
-The project is being designed with multiple layers of concurrency protection.
-
-### Layer 1 — Application Coordination
-
-Redis distributed lock:
-
-```text
-UrlCreationLock
-```
-
-### Layer 2 — Database Integrity
-
-MySQL unique constraint:
-
-```text
-uk_url_mapping_original_url_hash
-```
-
-### Layer 3 — Exception Handling
-
-Database constraint violations are handled by the application so concurrent requests do not result in uncontrolled failures.
-
----
-
-# Next Step
-
-## Caching — Tomorrow
-
-The next major feature will be **Redis caching**.
-
-Planned flow:
+Without caching, every request to a shortened URL requires a database lookup:
 
 ```text
 Client
-  |
-  v
-GET /shortCode
-  |
-  v
-Check Redis Cache
-  |
-  +---- Cache Hit ----> Return Original URL
-  |
-  +---- Cache Miss
-          |
-          v
-        MySQL
-          |
-          v
-      Store in Redis
-          |
-          v
-      Return URL
+  ↓
+Spring Boot
+  ↓
+MySQL
+  ↓
+Original URL
 ```
 
-Topics to cover:
+With Redis caching:
 
-1. Why caching is needed
-2. Cache-aside pattern
-3. Redis data structures
-4. Cache keys and values
-5. TTL
-6. Cache hit vs cache miss
-7. Integrating Spring Cache
-8. Redis caching in the URL shortener
-9. Cache invalidation
-10. Interaction between caching and URL expiration
-11. Testing cache behavior
-12. Caching considerations in a distributed system
+```text
+Client
+  ↓
+Spring Boot
+  ↓
+Redis Cache
+  ↓
+Original URL
+```
+
+If the URL is present in Redis, the application can avoid querying MySQL.
 
 ---
 
-## Current Status
+## Redis Cache Flow
+
+### First Request — Cache Miss
+
+```text
+GET /shortenUrl/abc123
+        ↓
+Check Redis
+        ↓
+Not Found
+        ↓
+Query MySQL
+        ↓
+Original URL found
+        ↓
+Store URL in Redis
+        ↓
+Redirect user
+```
+
+### Subsequent Request — Cache Hit
+
+```text
+GET /shortenUrl/abc123
+        ↓
+Check Redis
+        ↓
+URL Found
+        ↓
+Redirect user
+```
+
+This reduces unnecessary database queries for frequently accessed URLs.
+
+---
+
+# 🧠 Cache-Aside Strategy
+
+The project uses the **Cache-Aside** pattern.
+
+The application:
+
+1. Checks Redis first.
+2. If the value exists → return it.
+3. If Redis misses → query MySQL.
+4. Store the result in Redis.
+5. Return the original URL.
+
+Conceptually:
+
+```java
+String originalUrl = redis.get(shortCode);
+
+if (originalUrl != null) {
+    return originalUrl; // Cache Hit
+}
+
+originalUrl = database.find(shortCode);
+
+redis.set(shortCode, originalUrl); // Cache
+
+return originalUrl;
+```
+
+---
+
+# 🐳 2. Dockerization
+
+The application was dockerized so that the complete system can run without manually installing and configuring every dependency.
+
+The project now consists of three main containers:
+
+```text
+                 ┌─────────────────┐
+                 │   Spring Boot   │
+                 │   Application   │
+                 └────────┬────────┘
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+              ▼                       ▼
+       ┌─────────────┐        ┌─────────────┐
+       │    MySQL    │        │    Redis    │
+       │   Database  │        │    Cache    │
+       └─────────────┘        └─────────────┘
+```
+
+---
+
+# 📦 Dockerfile
+
+A `Dockerfile` was created to package the Spring Boot application into a Docker image.
+
+Its responsibilities include:
+
+* Selecting the Java runtime environment.
+* Copying the application JAR.
+* Defining the application startup command.
+* Creating a reproducible environment for the application.
+
+Conceptually:
+
+```text
+Dockerfile
+     ↓
+Build Docker Image
+     ↓
+Spring Boot Application Image
+     ↓
+Run Container
+```
+
+---
+
+# 🐳 docker-compose.yaml
+
+A `docker-compose.yaml` file was created to manage the complete application stack.
+
+It defines containers for:
+
+### 1. Spring Boot
+
+Runs the URL Shortener application.
+
+### 2. MySQL
+
+Stores URL mappings and application data.
+
+### 3. Redis
+
+Stores cached URL mappings.
+
+The containers communicate through the Docker Compose network.
+
+```text
+Spring Boot
+     │
+     ├──────────► MySQL
+     │
+     └──────────► Redis
+```
+
+---
+
+# 🗄️ MySQL Container
+
+MySQL is now running inside a Docker container.
+
+Configuration includes:
+
+```yaml
+mysql:
+  image: mysql:8.0
+```
+
+The database uses a Docker volume:
+
+```text
+mysql_data
+     ↓
+/var/lib/mysql
+```
+
+This allows MySQL data to persist even when the container is stopped or recreated.
+
+---
+
+# 🔴 Redis Container
+
+Redis is also running as a Docker container.
+
+The Spring Boot application communicates with Redis through the Docker Compose service name rather than `localhost`.
+
+Inside Docker:
+
+```text
+Redis host = redis
+Redis port = 6379
+```
+
+This is important because:
+
+```text
+localhost
+```
+
+inside the Spring Boot container refers to the Spring Boot container itself, not the Redis container.
+
+---
+
+# 🔐 Environment Variables
+
+Sensitive configuration was moved toward environment-based configuration using a `.env` file.
+
+The purpose of `.env` is to avoid hardcoding sensitive configuration directly inside `docker-compose.yaml`.
+
+Typical configuration includes:
+
+```env
+MYSQL_ROOT_PASSWORD=your_password
+MYSQL_DATABASE=url_shortener
+MYSQL_USER=your_user
+MYSQL_PASSWORD=your_password
+```
+
+The `.env` file should **not be committed to GitHub**.
+
+It should be included in `.gitignore`:
+
+```gitignore
+.env
+```
+
+A safe template can instead be provided:
+
+```text
+.env.example
+```
+
+---
+
+# 🌐 Docker Networking
+
+Docker Compose automatically creates a network for the services.
+
+The application can therefore communicate with:
+
+```text
+mysql:3306
+redis:6379
+```
+
+instead of using:
+
+```text
+localhost:3306
+localhost:6379
+```
+
+The architecture becomes:
+
+```text
+                 Docker Network
+┌─────────────────────────────────────────┐
+│                                         │
+│  ┌──────────────┐                       │
+│  │ Spring Boot  │                       │
+│  │    :8080     │                       │
+│  └──────┬───────┘                       │
+│         │                                │
+│    ┌────┴─────┐                          │
+│    │          │                          │
+│    ▼          ▼                          │
+│  MySQL      Redis                        │
+│  :3306      :6379                        │
+│                                         │
+└─────────────────────────────────────────┘
+```
+
+---
+
+# 🏥 Health Checks
+
+Docker Compose was also configured with health checks, particularly for MySQL.
+
+The purpose of a health check is to verify that a service is actually ready to accept connections.
+
+This is different from simply checking whether the container process is running.
+
+```text
+Container Running
+       ↓
+Health Check
+       ↓
+Database Ready
+```
+
+This helps prevent the Spring Boot application from trying to connect to MySQL before MySQL is ready.
+
+---
+
+# 🧪 Testing
+
+The Redis integration was tested through the URL Shortener API.
+
+### Create Short URL
+
+```http
+POST /shortenUrl
+```
+
+Example request:
+
+```json
+{
+    "originalUrl": "https://www.example.com"
+}
+```
+
+The application generates a short code and stores the mapping in MySQL.
+
+---
+
+## Test Redis Caching
+
+After creating a shortened URL:
+
+```http
+GET /shortenUrl/{shortCode}
+```
+
+### First request
+
+```text
+Redis → MISS
+MySQL → Query
+Redis → Store result
+Redirect
+```
+
+### Second request
+
+```text
+Redis → HIT
+Redirect
+```
+
+The second request should be served from Redis rather than requiring another MySQL lookup.
+
+---
+
+# 🐳 Running the Project with Docker
+
+Build and start all services:
+
+```bash
+docker compose up --build
+```
+
+Run in detached mode:
+
+```bash
+docker compose up --build -d
+```
+
+Check running containers:
+
+```bash
+docker ps
+```
+
+View application logs:
+
+```bash
+docker compose logs app
+```
+
+View Redis logs:
+
+```bash
+docker compose logs redis
+```
+
+View MySQL logs:
+
+```bash
+docker compose logs mysql
+```
+
+Stop the complete application:
+
+```bash
+docker compose down
+```
+
+---
+
+# 🧹 Removing Containers and Volumes
+
+To stop containers and remove the containers:
+
+```bash
+docker compose down
+```
+
+To also remove persistent volumes:
+
+```bash
+docker compose down -v
+```
+
+⚠️ Removing volumes will delete the stored MySQL data.
+
+---
+
+# 📁 Important Project Files
+
+The project now contains the following important infrastructure files:
+
+```text
+url-shortener/
+│
+├── src/
+│   └── main/
+│       └── java/
+│
+├── Dockerfile
+├── docker-compose.yaml
+├── .env
+├── .env.example
+├── .gitignore
+├── pom.xml
+└── README.md
+```
+
+---
+
+# 🏗️ Current Architecture
+
+The project has evolved into:
+
+```text
+                         Client
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ Spring Boot │
+                    │   REST API  │
+                    └──────┬──────┘
+                           │
+                 ┌─────────┴─────────┐
+                 │                   │
+                 ▼                   ▼
+             ┌───────┐          ┌────────┐
+             │ Redis │          │ MySQL  │
+             │ Cache │          │   DB   │
+             └───────┘          └────────┘
+```
+
+### Request flow
+
+```text
+POST /shortenUrl
+       │
+       ▼
+   Spring Boot
+       │
+       ▼
+     MySQL
+       │
+       ▼
+ Short URL Created
+```
+
+For redirection:
+
+```text
+GET /shortenUrl/{code}
+       │
+       ▼
+    Redis?
+    /    \
+  HIT    MISS
+   │       │
+   │       ▼
+   │     MySQL
+   │       │
+   │       ▼
+   │     Redis
+   │       │
+   └───┬───┘
+       ▼
+    Redirect
+```
+
+---
+
+# 🎯 What Was Learned Today
+
+### Redis
+
+* What caching is.
+* Why caching improves application performance.
+* Cache hit vs cache miss.
+* Cache-Aside pattern.
+* Using Redis with Spring Boot.
+* Running Redis through Docker.
+* Using Redis as a distributed cache.
+
+### Docker
+
+* What Docker containers are.
+* Difference between a Docker image and container.
+* Purpose of a `Dockerfile`.
+* Purpose of `docker-compose.yaml`.
+* Container networking.
+* Service names in Docker Compose.
+* Docker volumes.
+* Environment variables.
+* Container health checks.
+* Running a multi-container application.
+
+---
+
+# 🚀 Project Progress
 
 ### Completed
 
-* URL shortening
-* URL redirection
-* URL expiration
-* Scheduled expiration cleanup
-* Rate limiting
-* MySQL persistence
-* Flyway migrations
-* Database concurrency protection
-* SHA-256 URL hashing
-* Redis configuration
-* Distributed concurrency foundation
+* ✅ Spring Boot REST API
+* ✅ MySQL persistence
+* ✅ Flyway database migrations
+* ✅ URL expiration
+* ✅ Scheduled URL cleanup
+* ✅ Duplicate URL handling
+* ✅ Global exception handling
+* ✅ Rate limiting
+* ✅ Redis caching
+* ✅ Dockerfile
+* ✅ Docker Compose
+* ✅ MySQL container
+* ✅ Redis container
+* ✅ Spring Boot container
+* ✅ Docker networking
+* ✅ Environment-based configuration
+* ✅ Container health checks
 
-### In Progress
+### Next Steps
 
-* Completing and testing `UrlCreationLock`
-* Distributed concurrency testing
+The next stage can focus on making the system more **distributed and scalable**, including:
 
-### Next
-
-* **Redis Caching**
+* Redis TTL and cache eviction
+* Cache invalidation
+* Concurrency and race-condition handling
+* Distributed rate limiting
+* Docker optimization
+* Horizontal scaling
+* Load balancing
+* Database indexing optimization
+* Database replication
+* Sharding
+* Distributed-system consistency
+* Production deployment
 
 ---
 
-## Development Principle
+## 📌 Current Architecture Goal
 
-The project is being developed progressively:
+The long-term goal is to evolve the project from a basic URL shortener into a production-style distributed system:
 
 ```text
-Basic URL Shortener
-        ↓
-Database
-        ↓
-Concurrency
-        ↓
-Distributed Concurrency
-        ↓
-Caching
-        ↓
-Scalability
-        ↓
-Production-oriented Distributed System
+                         ┌──────────────┐
+                         │    Client    │
+                         └───────┬──────┘
+                                 │
+                                 ▼
+                         ┌──────────────┐
+                         │Load Balancer │
+                         └───────┬──────┘
+                                 │
+                  ┌──────────────┼──────────────┐
+                  │              │              │
+                  ▼              ▼              ▼
+             ┌────────┐     ┌────────┐     ┌────────┐
+             │App #1  │     │App #2  │     │App #3  │
+             └───┬────┘     └───┬────┘     └───┬────┘
+                 │              │              │
+                 └──────────────┼──────────────┘
+                                │
+                         ┌──────▼──────┐
+                         │    Redis    │
+                         │    Cache    │
+                         └──────┬──────┘
+                                │
+                         ┌──────▼──────┐
+                         │    MySQL    │
+                         │   Cluster   │
+                         └─────────────┘
 ```
 
-The goal is not just to make the URL shortener work, but to understand **why each distributed-system component is needed and what problem it solves**.
+This establishes the foundation for turning the URL Shortener into a **scalable distributed backend system**.

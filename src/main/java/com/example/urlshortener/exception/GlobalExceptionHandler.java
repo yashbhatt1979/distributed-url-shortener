@@ -50,8 +50,18 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, String>> handleGenericException(
             Exception ex) {
 
+        // Print the complete exception and stack trace
+        // to the Spring Boot console for debugging.
+        ex.printStackTrace();
+
+        String message = ex.getMessage();
+
+        if (message == null || message.isBlank()) {
+            message = "An unexpected error occurred";
+        }
+
         return ResponseEntity
                 .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("error", "An unexpected error occurred"));
+                .body(Map.of("error", message));
     }
 }

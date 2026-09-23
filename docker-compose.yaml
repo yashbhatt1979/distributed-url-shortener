@@ -1,0 +1,99 @@
+services:
+
+  # ==========================================
+  # MYSQL DATABASE
+  # ==========================================
+
+  mysql:
+    image: mysql:8.0
+    container_name: url-shortener-mysql
+
+    environment:
+      MYSQL_ROOT_PASSWORD: Yogeshbhatt@2003
+      MYSQL_DATABASE: url_shortener
+
+    ports:
+      - "3307:3306"
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pYogeshbhatt@2003"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+
+  # ==========================================
+  # REDIS
+  # ==========================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: url-shortener-redis
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis_data:/data
+
+    command: redis-server --appendonly yes
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  # ==========================================
+  # SPRING BOOT APPLICATION
+  # ==========================================
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: url-shortener-app
+
+    ports:
+      - "8080:8080"
+
+    environment:
+
+      # --------------------------
+      # MySQL
+      # --------------------------
+
+      DB_URL: jdbc:mysql://mysql:3306/url_shortener?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      DB_USERNAME: root
+      DB_PASSWORD: Yogeshbhatt@2003
+
+      # --------------------------
+      # Redis
+      # --------------------------
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+      redis:
+        condition: service_healthy
+
+
+# ==========================================
+# PERSISTENT VOLUMES
+# ==========================================
+
+volumes:
+
+  mysql_data:
+
+  redis_data:
