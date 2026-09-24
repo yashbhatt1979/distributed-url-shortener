@@ -1,622 +1,446 @@
-# 🚀 Distributed URL Shortener — Redis Caching & Dockerization
+Distributed URL Shortener
 
-## 📅 Work Completed — 23 September 2026
+Today's Work --- Horizontal Scaling, MySQL Replication & Sharding Foundation
 
-Today, the URL Shortener project was extended with **Redis caching** and fully **dockerized** so that the application, MySQL database, and Redis can run together as containers.
+Date: 24 September 2026
 
----
+Today we worked on scaling the Distributed URL Shortener and rebuilt the
+database infrastructure from a clean Docker environment.
 
-# 🔴 1. Redis Caching
+Status: Horizontal scaling and MySQL primary-replica replication
+were implemented and verified. The sharding work was prepared as the
+next database-scaling stage; full production sharding was not yet
+completed.
 
-Redis was integrated into the URL Shortener to improve the performance of URL redirection.
+1. Clean Docker Environment
 
-### Why Redis?
+We removed the previous Docker setup so that replication could be
+rebuilt from a known-good state.
 
-Without caching, every request to a shortened URL requires a database lookup:
+Removed
 
-```text
-Client
-  ↓
-Spring Boot
-  ↓
-MySQL
-  ↓
-Original URL
-```
+Old Docker containers
 
-With Redis caching:
+Old MySQL primary data volume
 
-```text
-Client
-  ↓
-Spring Boot
-  ↓
-Redis Cache
-  ↓
-Original URL
-```
+Old MySQL replica data volume
 
-If the URL is present in Redis, the application can avoid querying MySQL.
+Old Redis data volume
 
----
+Old project Docker network
 
-## Redis Cache Flow
+This gave us a clean database environment without stale MySQL
+replication metadata.
 
-### First Request — Cache Miss
+2. Horizontal Scaling
 
-```text
-GET /shortenUrl/abc123
-        ↓
-Check Redis
-        ↓
-Not Found
-        ↓
-Query MySQL
-        ↓
-Original URL found
-        ↓
-Store URL in Redis
-        ↓
-Redirect user
-```
+We configured the Spring Boot application to run as multiple instances:
 
-### Subsequent Request — Cache Hit
+app-1
+app-2
+app-3
 
-```text
-GET /shortenUrl/abc123
-        ↓
-Check Redis
-        ↓
-URL Found
-        ↓
-Redirect user
-```
+The instances use the same Spring Boot application image and share the
+Docker network.
 
-This reduces unnecessary database queries for frequently accessed URLs.
+Architecture
 
----
+                    Client
+                      |
+                      v
+              +---------------+
+              | Load Balancer  |
+              +---------------+
+                 /     |     \
+                /      |      \
+               v       v       v
+            app-1    app-2    app-3
+               \       |       /
+                \      |      /
+                 \     |     /
+                  v    v    v
+                MySQL Primary
 
-# 🧠 Cache-Aside Strategy
+The important concept is that multiple application instances can run
+simultaneously, allowing the application tier to scale horizontally.
 
-The project uses the **Cache-Aside** pattern.
+3. MySQL Primary Database
 
-The application:
+A dedicated MySQL primary container was configured:
 
-1. Checks Redis first.
-2. If the value exists → return it.
-3. If Redis misses → query MySQL.
-4. Store the result in Redis.
-5. Return the original URL.
+url-shortener-mysql-primary
+
+Configuration
+
+MySQL 8.0
+
+server-id=1
+
+Binary logging enabled
+
+Row-based binary logging
+
+binlog-do-db=url_shortener
+
+bind-address=0.0.0.0
+
+Primary MySQL is exposed on:
+
+localhost:3307
+
+4. MySQL Replica Database
+
+A separate MySQL replica container was configured:
+
+url-shortener-mysql-replica
+
+Configuration
+
+MySQL 8.0
+
+server-id=2
+
+Binary logging enabled
+
+Row-based binary logging
+
+Relay log enabled
+
+bind-address=0.0.0.0
+
+Replica MySQL is exposed on:
+
+localhost:3308
+
+5. Replication User
+
+The primary creates a dedicated replication user:
+
+CREATE USER IF NOT EXISTS 'replicator'@'%'
+IDENTIFIED BY 'replicator_password';
+
+GRANT REPLICATION SLAVE, REPLICATION CLIENT
+ON *.*
+TO 'replicator'@'%';
+
+We verified that the user exists and has the required privileges.
+
+6. Primary → Replica Replication
+
+Replication was configured manually after both MySQL servers were
+healthy.
+
+The replica was configured using:
+
+CHANGE REPLICATION SOURCE TO
+SOURCE_HOST='mysql-primary',
+SOURCE_PORT=3306,
+SOURCE_USER='replicator',
+SOURCE_PASSWORD='replicator_password',
+SOURCE_LOG_FILE='mysql-bin.000003',
+SOURCE_LOG_POS=157,
+GET_SOURCE_PUBLIC_KEY=1;
+
+Replication was then started with:
+
+START REPLICA;
+
+Replication Flow
+
+             MySQL Primary
+             server-id = 1
+                   |
+                   | Binary Log
+                   v
+          mysql-bin.000003
+                   |
+                   v
+             MySQL Replica
+             server-id = 2
+                   |
+                   v
+             Relay Log
+
+7. Replication Verification
+
+We did not rely only on SHOW REPLICA STATUS.
+
+We tested actual database changes.
+
+Schema replication test
+
+A table was created on the primary:
+
+CREATE TABLE url_shortener.replication_test (
+    id INT PRIMARY KEY,
+    message VARCHAR(100)
+);
+
+The table appeared automatically on the replica.
+
+We then removed it from the primary:
+
+DROP TABLE url_shortener.replication_test;
+
+The deletion also propagated to the replica.
+
+Application data replication test
+
+A URL was created through Postman.
+
+The resulting url_mapping row was verified on the primary:
+
+SELECT id, short_code, original_url
+FROM url_shortener.url_mapping;
+
+The same row was then verified on the replica.
+
+This confirmed:
+
+Application
+     |
+     v
+Primary MySQL
+     |
+     | Replication
+     v
+Replica MySQL
+
+Result: MySQL data replication is working successfully.
+
+8. Spring Boot + Flyway
+
+The Spring Boot application was connected to the primary:
+
+jdbc:mysql://mysql-primary:3306/url_shortener
+
+Flyway successfully detected and applied the project's migrations.
+
+Current application schema includes:
+
+V1
+
+url_mapping
+
+with:
+
+id
+
+short_code
+
+original_url
+
+created_at
+
+expires_at
+
+V2
+
+Added:
+
+original_url_hash
+
+with a unique constraint for concurrency protection.
+
+9. Redis
+
+Redis remains part of the distributed architecture:
+
+Redis 7
+
+It is used by the application for:
+
+Distributed locking
+
+Caching
+
+Rate limiting
+
+Redis was also checked during today's troubleshooting. The cache was
+empty when we investigated the duplicate-URL behavior.
+
+10. Duplicate URL Investigation
+
+We also investigated a case where a URL was deleted directly from MySQL
+but the application still reported that the URL already existed.
+
+The database was checked directly:
+
+SELECT *
+FROM url_shortener.url_mapping;
+
+The table was empty.
+
+Redis was also checked and found empty.
+
+After testing through Postman again, URL creation worked correctly.
+
+This helped establish that the problem was not caused by the current
+MySQL replication setup.
+
+11. Current Docker Architecture
+
+The current infrastructure is based around:
+
+                    Client
+                      |
+                      v
+             Spring Boot Apps
+              /      |      \
+             /       |       \
+          app-1     app-2    app-3
+             \       |       /
+              \      |      /
+               v     v     v
+              MySQL Primary
+                    |
+                    | Replication
+                    v
+              MySQL Replica
+
+                    +
+                    |
+                  Redis
+
+12. Sharding
+
+Sharding is part of the distributed database scaling plan.
+
+The goal is to eventually distribute data across multiple database
+shards rather than storing all application data on one MySQL primary.
 
 Conceptually:
 
-```java
-String originalUrl = redis.get(shortCode);
+                 Application
+                      |
+                Shard Router
+                 /    |    \
+                /     |     \
+               v      v      v
+           Shard 1  Shard 2  Shard 3
+             MySQL    MySQL    MySQL
 
-if (originalUrl != null) {
-    return originalUrl; // Cache Hit
-}
+A shard key and routing strategy still need to be finalized and
+implemented.
 
-originalUrl = database.find(shortCode);
+Therefore:
 
-redis.set(shortCode, originalUrl); // Cache
+Horizontal application scaling and MySQL replication were completed
+and verified today. Full database sharding is the next implementation
+stage.
 
-return originalUrl;
-```
+13. What We Successfully Proved Today
 
----
+Application layer
 
-# 🐳 2. Dockerization
+Multiple Spring Boot application instances configured
 
-The application was dockerized so that the complete system can run without manually installing and configuring every dependency.
+Dockerized application
 
-The project now consists of three main containers:
+Horizontal scaling architecture established
 
-```text
-                 ┌─────────────────┐
-                 │   Spring Boot   │
-                 │   Application   │
-                 └────────┬────────┘
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-              ▼                       ▼
-       ┌─────────────┐        ┌─────────────┐
-       │    MySQL    │        │    Redis    │
-       │   Database  │        │    Cache    │
-       └─────────────┘        └─────────────┘
-```
+Database layer
 
----
+MySQL primary configured
 
-# 📦 Dockerfile
+MySQL replica configured
 
-A `Dockerfile` was created to package the Spring Boot application into a Docker image.
+Unique server IDs configured
 
-Its responsibilities include:
+Binary logging enabled
 
-* Selecting the Java runtime environment.
-* Copying the application JAR.
-* Defining the application startup command.
-* Creating a reproducible environment for the application.
+Replication user created
 
-Conceptually:
+Primary → replica connection established
 
-```text
-Dockerfile
-     ↓
-Build Docker Image
-     ↓
-Spring Boot Application Image
-     ↓
-Run Container
-```
+Schema replication tested
 
----
+Data replication tested
 
-# 🐳 docker-compose.yaml
+Delete replication tested
 
-A `docker-compose.yaml` file was created to manage the complete application stack.
+Infrastructure
 
-It defines containers for:
+Docker network configured
 
-### 1. Spring Boot
+Persistent MySQL volumes configured
 
-Runs the URL Shortener application.
+Redis configured
 
-### 2. MySQL
+Spring Boot connected to MySQL primary
 
-Stores URL mappings and application data.
+Flyway migrations successfully executed
 
-### 3. Redis
+Next
 
-Stores cached URL mappings.
+Design shard key
 
-The containers communicate through the Docker Compose network.
+Design shard-routing strategy
 
-```text
-Spring Boot
-     │
-     ├──────────► MySQL
-     │
-     └──────────► Redis
-```
+Create multiple MySQL shards
 
----
+Implement application-level shard routing
 
-# 🗄️ MySQL Container
+Test data distribution across shards
 
-MySQL is now running inside a Docker container.
+Combine sharding with replication
 
-Configuration includes:
+Add load balancing/failover strategy
 
-```yaml
-mysql:
-  image: mysql:8.0
-```
+Test failure scenarios
 
-The database uses a Docker volume:
+14. Key Learning
 
-```text
-mysql_data
-     ↓
-/var/lib/mysql
-```
+Today's architecture introduced an important distinction:
 
-This allows MySQL data to persist even when the container is stopped or recreated.
+Horizontal scaling
 
----
+Adds more application instances:
 
-# 🔴 Redis Container
+app-1 + app-2 + app-3
 
-Redis is also running as a Docker container.
+This increases application-layer capacity.
 
-The Spring Boot application communicates with Redis through the Docker Compose service name rather than `localhost`.
+Replication
 
-Inside Docker:
+Copies database changes:
 
-```text
-Redis host = redis
-Redis port = 6379
-```
+Primary → Replica
 
-This is important because:
+This improves read scalability and provides a database redundancy
+mechanism.
 
-```text
-localhost
-```
+Sharding
 
-inside the Spring Boot container refers to the Spring Boot container itself, not the Redis container.
-
----
-
-# 🔐 Environment Variables
-
-Sensitive configuration was moved toward environment-based configuration using a `.env` file.
-
-The purpose of `.env` is to avoid hardcoding sensitive configuration directly inside `docker-compose.yaml`.
-
-Typical configuration includes:
-
-```env
-MYSQL_ROOT_PASSWORD=your_password
-MYSQL_DATABASE=url_shortener
-MYSQL_USER=your_user
-MYSQL_PASSWORD=your_password
-```
-
-The `.env` file should **not be committed to GitHub**.
-
-It should be included in `.gitignore`:
-
-```gitignore
-.env
-```
-
-A safe template can instead be provided:
-
-```text
-.env.example
-```
-
----
-
-# 🌐 Docker Networking
-
-Docker Compose automatically creates a network for the services.
-
-The application can therefore communicate with:
-
-```text
-mysql:3306
-redis:6379
-```
-
-instead of using:
-
-```text
-localhost:3306
-localhost:6379
-```
-
-The architecture becomes:
-
-```text
-                 Docker Network
-┌─────────────────────────────────────────┐
-│                                         │
-│  ┌──────────────┐                       │
-│  │ Spring Boot  │                       │
-│  │    :8080     │                       │
-│  └──────┬───────┘                       │
-│         │                                │
-│    ┌────┴─────┐                          │
-│    │          │                          │
-│    ▼          ▼                          │
-│  MySQL      Redis                        │
-│  :3306      :6379                        │
-│                                         │
-└─────────────────────────────────────────┘
-```
-
----
-
-# 🏥 Health Checks
-
-Docker Compose was also configured with health checks, particularly for MySQL.
-
-The purpose of a health check is to verify that a service is actually ready to accept connections.
-
-This is different from simply checking whether the container process is running.
-
-```text
-Container Running
-       ↓
-Health Check
-       ↓
-Database Ready
-```
-
-This helps prevent the Spring Boot application from trying to connect to MySQL before MySQL is ready.
-
----
-
-# 🧪 Testing
-
-The Redis integration was tested through the URL Shortener API.
-
-### Create Short URL
-
-```http
-POST /shortenUrl
-```
-
-Example request:
-
-```json
-{
-    "originalUrl": "https://www.example.com"
-}
-```
-
-The application generates a short code and stores the mapping in MySQL.
-
----
-
-## Test Redis Caching
-
-After creating a shortened URL:
-
-```http
-GET /shortenUrl/{shortCode}
-```
-
-### First request
-
-```text
-Redis → MISS
-MySQL → Query
-Redis → Store result
-Redirect
-```
-
-### Second request
-
-```text
-Redis → HIT
-Redirect
-```
-
-The second request should be served from Redis rather than requiring another MySQL lookup.
-
----
-
-# 🐳 Running the Project with Docker
-
-Build and start all services:
-
-```bash
-docker compose up --build
-```
-
-Run in detached mode:
-
-```bash
-docker compose up --build -d
-```
-
-Check running containers:
-
-```bash
-docker ps
-```
-
-View application logs:
-
-```bash
-docker compose logs app
-```
-
-View Redis logs:
-
-```bash
-docker compose logs redis
-```
-
-View MySQL logs:
-
-```bash
-docker compose logs mysql
-```
-
-Stop the complete application:
-
-```bash
-docker compose down
-```
-
----
-
-# 🧹 Removing Containers and Volumes
-
-To stop containers and remove the containers:
-
-```bash
-docker compose down
-```
-
-To also remove persistent volumes:
-
-```bash
-docker compose down -v
-```
-
-⚠️ Removing volumes will delete the stored MySQL data.
-
----
-
-# 📁 Important Project Files
-
-The project now contains the following important infrastructure files:
-
-```text
-url-shortener/
-│
-├── src/
-│   └── main/
-│       └── java/
-│
-├── Dockerfile
-├── docker-compose.yaml
-├── .env
-├── .env.example
-├── .gitignore
-├── pom.xml
-└── README.md
-```
-
----
-
-# 🏗️ Current Architecture
-
-The project has evolved into:
-
-```text
-                         Client
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │ Spring Boot │
-                    │   REST API  │
-                    └──────┬──────┘
-                           │
-                 ┌─────────┴─────────┐
-                 │                   │
-                 ▼                   ▼
-             ┌───────┐          ┌────────┐
-             │ Redis │          │ MySQL  │
-             │ Cache │          │   DB   │
-             └───────┘          └────────┘
-```
-
-### Request flow
-
-```text
-POST /shortenUrl
-       │
-       ▼
-   Spring Boot
-       │
-       ▼
-     MySQL
-       │
-       ▼
- Short URL Created
-```
-
-For redirection:
-
-```text
-GET /shortenUrl/{code}
-       │
-       ▼
-    Redis?
-    /    \
-  HIT    MISS
-   │       │
-   │       ▼
-   │     MySQL
-   │       │
-   │       ▼
-   │     Redis
-   │       │
-   └───┬───┘
-       ▼
-    Redirect
-```
-
----
-
-# 🎯 What Was Learned Today
-
-### Redis
-
-* What caching is.
-* Why caching improves application performance.
-* Cache hit vs cache miss.
-* Cache-Aside pattern.
-* Using Redis with Spring Boot.
-* Running Redis through Docker.
-* Using Redis as a distributed cache.
-
-### Docker
-
-* What Docker containers are.
-* Difference between a Docker image and container.
-* Purpose of a `Dockerfile`.
-* Purpose of `docker-compose.yaml`.
-* Container networking.
-* Service names in Docker Compose.
-* Docker volumes.
-* Environment variables.
-* Container health checks.
-* Running a multi-container application.
-
----
-
-# 🚀 Project Progress
-
-### Completed
-
-* ✅ Spring Boot REST API
-* ✅ MySQL persistence
-* ✅ Flyway database migrations
-* ✅ URL expiration
-* ✅ Scheduled URL cleanup
-* ✅ Duplicate URL handling
-* ✅ Global exception handling
-* ✅ Rate limiting
-* ✅ Redis caching
-* ✅ Dockerfile
-* ✅ Docker Compose
-* ✅ MySQL container
-* ✅ Redis container
-* ✅ Spring Boot container
-* ✅ Docker networking
-* ✅ Environment-based configuration
-* ✅ Container health checks
-
-### Next Steps
-
-The next stage can focus on making the system more **distributed and scalable**, including:
-
-* Redis TTL and cache eviction
-* Cache invalidation
-* Concurrency and race-condition handling
-* Distributed rate limiting
-* Docker optimization
-* Horizontal scaling
-* Load balancing
-* Database indexing optimization
-* Database replication
-* Sharding
-* Distributed-system consistency
-* Production deployment
-
----
-
-## 📌 Current Architecture Goal
-
-The long-term goal is to evolve the project from a basic URL shortener into a production-style distributed system:
-
-```text
-                         ┌──────────────┐
-                         │    Client    │
-                         └───────┬──────┘
-                                 │
-                                 ▼
-                         ┌──────────────┐
-                         │Load Balancer │
-                         └───────┬──────┘
-                                 │
-                  ┌──────────────┼──────────────┐
-                  │              │              │
-                  ▼              ▼              ▼
-             ┌────────┐     ┌────────┐     ┌────────┐
-             │App #1  │     │App #2  │     │App #3  │
-             └───┬────┘     └───┬────┘     └───┬────┘
-                 │              │              │
-                 └──────────────┼──────────────┘
-                                │
-                         ┌──────▼──────┐
-                         │    Redis    │
-                         │    Cache    │
-                         └──────┬──────┘
-                                │
-                         ┌──────▼──────┐
-                         │    MySQL    │
-                         │   Cluster   │
-                         └─────────────┘
-```
-
-This establishes the foundation for turning the URL Shortener into a **scalable distributed backend system**.
+Splits data across multiple databases:
+
+Shard 1
+Shard 2
+Shard 3
+
+This is the next major step for scaling the database itself.
+
+15. End-of-Day Status
+
+Distributed URL Shortener
+        |
+        +-- Docker -------------------- DONE
+        |
+        +-- Redis --------------------- DONE
+        |
+        +-- Horizontal Scaling -------- DONE
+        |
+        +-- MySQL Primary ------------- DONE
+        |
+        +-- MySQL Replica ------------- DONE
+        |
+        +-- Primary → Replica --------- VERIFIED
+        |
+        +-- Application Data ---------- VERIFIED
+        |
+        +-- Database Sharding ---------- NEXT
+
+Today's major milestone: The project now has a clean, working
+Dockerized MySQL primary-replica setup with verified application-data
+replication, alongside horizontally scalable Spring Boot application
+instances.

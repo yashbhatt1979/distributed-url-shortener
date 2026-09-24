@@ -1,12 +1,15 @@
 services:
 
   # ==========================================
-  # MYSQL DATABASE
+  # MYSQL PRIMARY DATABASE
   # ==========================================
 
-  mysql:
-    image: mysql:8.0
-    container_name: url-shortener-mysql
+  mysql-primary:
+    build:
+      context: ./mysql/primary
+      dockerfile: Dockerfile
+
+    container_name: url-shortener-mysql-primary
 
     environment:
       MYSQL_ROOT_PASSWORD: Yogeshbhatt@2003
@@ -16,7 +19,8 @@ services:
       - "3307:3306"
 
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mysql_primary_data:/var/lib/mysql
+      - ./mysql/primary/init.sql:/docker-entrypoint-initdb.d/init.sql
 
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pYogeshbhatt@2003"]
@@ -24,6 +28,46 @@ services:
       timeout: 10s
       retries: 15
       start_period: 60s
+
+    networks:
+      - url-shortener-network
+
+
+  # ==========================================
+  # MYSQL REPLICA DATABASE
+  # ==========================================
+
+  mysql-replica:
+    build:
+      context: ./mysql/replica
+      dockerfile: Dockerfile
+
+    container_name: url-shortener-mysql-replica
+
+    environment:
+      MYSQL_ROOT_PASSWORD: Yogeshbhatt@2003
+      MYSQL_DATABASE: url_shortener
+
+    ports:
+      - "3308:3306"
+
+    volumes:
+      - mysql_replica_data:/var/lib/mysql
+      - ./mysql/replica/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pYogeshbhatt@2003"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+    networks:
+      - url-shortener-network
 
 
   # ==========================================
@@ -48,44 +92,126 @@ services:
       timeout: 5s
       retries: 10
 
+    networks:
+      - url-shortener-network
+
 
   # ==========================================
-  # SPRING BOOT APPLICATION
+  # SPRING BOOT APPLICATION - INSTANCE 1
   # ==========================================
 
-  app:
+  app-1:
     build:
       context: .
       dockerfile: Dockerfile
 
-    container_name: url-shortener-app
+    container_name: url-shortener-app-1
 
     ports:
       - "8080:8080"
 
     environment:
-
-      # --------------------------
-      # MySQL
-      # --------------------------
-
-      DB_URL: jdbc:mysql://mysql:3306/url_shortener?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      DB_URL: jdbc:mysql://mysql-primary:3306/url_shortener?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
       DB_USERNAME: root
       DB_PASSWORD: Yogeshbhatt@2003
-
-      # --------------------------
-      # Redis
-      # --------------------------
 
       REDIS_HOST: redis
       REDIS_PORT: 6379
 
     depends_on:
-      mysql:
+      mysql-primary:
+        condition: service_healthy
+
+      mysql-replica:
         condition: service_healthy
 
       redis:
         condition: service_healthy
+
+    networks:
+      - url-shortener-network
+
+
+  # ==========================================
+  # SPRING BOOT APPLICATION - INSTANCE 2
+  # ==========================================
+
+  app-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: url-shortener-app-2
+
+    expose:
+      - "8080"
+
+    environment:
+      DB_URL: jdbc:mysql://mysql-primary:3306/url_shortener?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      DB_USERNAME: root
+      DB_PASSWORD: Yogeshbhatt@2003
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+
+      mysql-replica:
+        condition: service_healthy
+
+      redis:
+        condition: service_healthy
+
+    networks:
+      - url-shortener-network
+
+
+  # ==========================================
+  # SPRING BOOT APPLICATION - INSTANCE 3
+  # ==========================================
+
+  app-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: url-shortener-app-3
+
+    expose:
+      - "8080"
+
+    environment:
+      DB_URL: jdbc:mysql://mysql-primary:3306/url_shortener?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      DB_USERNAME: root
+      DB_PASSWORD: Yogeshbhatt@2003
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+
+      mysql-replica:
+        condition: service_healthy
+
+      redis:
+        condition: service_healthy
+
+    networks:
+      - url-shortener-network
+
+
+# ==========================================
+# NETWORK
+# ==========================================
+
+networks:
+
+  url-shortener-network:
+    driver: bridge
 
 
 # ==========================================
@@ -94,6 +220,8 @@ services:
 
 volumes:
 
-  mysql_data:
+  mysql_primary_data:
+
+  mysql_replica_data:
 
   redis_data:
