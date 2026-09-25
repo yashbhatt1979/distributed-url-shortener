@@ -76,7 +76,7 @@
 
 
         <!-- ====================================== -->
-        <!-- 5. Monitoring / Production             -->
+        <!-- 5. Monitoring / Production            -->
         <!-- ====================================== -->
 
         <dependency>
@@ -132,7 +132,6 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
-
 
         </plugins>
 

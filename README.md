@@ -1,446 +1,725 @@
-Distributed URL Shortener
+# Distributed URL Shortener
 
-Today's Work --- Horizontal Scaling, MySQL Replication & Sharding Foundation
+A distributed URL shortener built using **Java 17, Spring Boot, MySQL, Redis, Docker, and Nginx**.
 
-Date: 24 September 2026
+The project focuses not only on URL shortening but also on important backend and distributed-systems concepts such as:
 
-Today we worked on scaling the Distributed URL Shortener and rebuilt the
-database infrastructure from a clean Docker environment.
+* Concurrency
+* Thread Safety
+* Redis Caching
+* Distributed Locks
+* Rate Limiting
+* Horizontal Scaling
+* Load Balancing
+* Database Replication
+* Docker Containerization
 
-Status: Horizontal scaling and MySQL primary-replica replication
-were implemented and verified. The sharding work was prepared as the
-next database-scaling stage; full production sharding was not yet
-completed.
+---
 
-1. Clean Docker Environment
+# Architecture
 
-We removed the previous Docker setup so that replication could be
-rebuilt from a known-good state.
+Current architecture:
 
-Removed
+```text
+                         Client
+                           |
+                           v
+                    +-------------+
+                    |    Nginx    |
+                    |Load Balancer|
+                    +-------------+
+                       /   |   \
+                      /    |    \
+                     v     v     v
+                  App-1  App-2  App-3
+                    |      |      |
+                    +------+------+
+                           |
+                    +------+------+
+                    |             |
+                    v             v
+                  Redis        MySQL
+                                |
+                                v
+                         MySQL Replica
+```
 
-Old Docker containers
+---
 
-Old MySQL primary data volume
+# Features Implemented
 
-Old MySQL replica data volume
+## 1. Redis Token Bucket Rate Limiting
 
-Old Redis data volume
+A distributed rate limiter was implemented using **Redis** and the **Token Bucket algorithm**.
 
-Old project Docker network
+The rate limiter protects the API from excessive requests and ensures that multiple application instances can share the same rate-limit state.
 
-This gave us a clean database environment without stale MySQL
-replication metadata.
+### Why Redis?
 
-2. Horizontal Scaling
+Because the application runs multiple instances:
 
-We configured the Spring Boot application to run as multiple instances:
+```text
+App-1
+App-2
+App-3
+```
 
-app-1
-app-2
-app-3
+Using an in-memory rate limiter inside each application would create separate limits:
 
-The instances use the same Spring Boot application image and share the
-Docker network.
+```text
+App-1 → separate bucket
+App-2 → separate bucket
+App-3 → separate bucket
+```
 
-Architecture
+This would allow a client to potentially bypass the intended global limit by hitting different instances.
 
-                    Client
-                      |
-                      v
-              +---------------+
-              | Load Balancer  |
-              +---------------+
-                 /     |     \
-                /      |      \
-               v       v       v
-            app-1    app-2    app-3
-               \       |       /
-                \      |      /
-                 \     |     /
-                  v    v    v
-                MySQL Primary
+Redis provides a shared state:
 
-The important concept is that multiple application instances can run
-simultaneously, allowing the application tier to scale horizontally.
+```text
+             +---------+
+             |  Redis  |
+             +---------+
+              /   |   \
+             /    |    \
+          App-1 App-2 App-3
+```
 
-3. MySQL Primary Database
+All instances therefore use the same rate-limit information.
 
-A dedicated MySQL primary container was configured:
+---
 
-url-shortener-mysql-primary
+# Token Bucket Algorithm
 
-Configuration
-
-MySQL 8.0
-
-server-id=1
-
-Binary logging enabled
-
-Row-based binary logging
-
-binlog-do-db=url_shortener
-
-bind-address=0.0.0.0
-
-Primary MySQL is exposed on:
-
-localhost:3307
-
-4. MySQL Replica Database
-
-A separate MySQL replica container was configured:
-
-url-shortener-mysql-replica
-
-Configuration
-
-MySQL 8.0
-
-server-id=2
-
-Binary logging enabled
-
-Row-based binary logging
-
-Relay log enabled
-
-bind-address=0.0.0.0
-
-Replica MySQL is exposed on:
-
-localhost:3308
-
-5. Replication User
-
-The primary creates a dedicated replication user:
-
-CREATE USER IF NOT EXISTS 'replicator'@'%'
-IDENTIFIED BY 'replicator_password';
-
-GRANT REPLICATION SLAVE, REPLICATION CLIENT
-ON *.*
-TO 'replicator'@'%';
-
-We verified that the user exists and has the required privileges.
-
-6. Primary → Replica Replication
-
-Replication was configured manually after both MySQL servers were
-healthy.
-
-The replica was configured using:
-
-CHANGE REPLICATION SOURCE TO
-SOURCE_HOST='mysql-primary',
-SOURCE_PORT=3306,
-SOURCE_USER='replicator',
-SOURCE_PASSWORD='replicator_password',
-SOURCE_LOG_FILE='mysql-bin.000003',
-SOURCE_LOG_POS=157,
-GET_SOURCE_PUBLIC_KEY=1;
-
-Replication was then started with:
-
-START REPLICA;
-
-Replication Flow
-
-             MySQL Primary
-             server-id = 1
-                   |
-                   | Binary Log
-                   v
-          mysql-bin.000003
-                   |
-                   v
-             MySQL Replica
-             server-id = 2
-                   |
-                   v
-             Relay Log
-
-7. Replication Verification
-
-We did not rely only on SHOW REPLICA STATUS.
-
-We tested actual database changes.
-
-Schema replication test
-
-A table was created on the primary:
-
-CREATE TABLE url_shortener.replication_test (
-    id INT PRIMARY KEY,
-    message VARCHAR(100)
-);
-
-The table appeared automatically on the replica.
-
-We then removed it from the primary:
-
-DROP TABLE url_shortener.replication_test;
-
-The deletion also propagated to the replica.
-
-Application data replication test
-
-A URL was created through Postman.
-
-The resulting url_mapping row was verified on the primary:
-
-SELECT id, short_code, original_url
-FROM url_shortener.url_mapping;
-
-The same row was then verified on the replica.
-
-This confirmed:
-
-Application
-     |
-     v
-Primary MySQL
-     |
-     | Replication
-     v
-Replica MySQL
-
-Result: MySQL data replication is working successfully.
-
-8. Spring Boot + Flyway
-
-The Spring Boot application was connected to the primary:
-
-jdbc:mysql://mysql-primary:3306/url_shortener
-
-Flyway successfully detected and applied the project's migrations.
-
-Current application schema includes:
-
-V1
-
-url_mapping
-
-with:
-
-id
-
-short_code
-
-original_url
-
-created_at
-
-expires_at
-
-V2
-
-Added:
-
-original_url_hash
-
-with a unique constraint for concurrency protection.
-
-9. Redis
-
-Redis remains part of the distributed architecture:
-
-Redis 7
-
-It is used by the application for:
-
-Distributed locking
-
-Caching
-
-Rate limiting
-
-Redis was also checked during today's troubleshooting. The cache was
-empty when we investigated the duplicate-URL behavior.
-
-10. Duplicate URL Investigation
-
-We also investigated a case where a URL was deleted directly from MySQL
-but the application still reported that the URL already existed.
-
-The database was checked directly:
-
-SELECT *
-FROM url_shortener.url_mapping;
-
-The table was empty.
-
-Redis was also checked and found empty.
-
-After testing through Postman again, URL creation worked correctly.
-
-This helped establish that the problem was not caused by the current
-MySQL replication setup.
-
-11. Current Docker Architecture
-
-The current infrastructure is based around:
-
-                    Client
-                      |
-                      v
-             Spring Boot Apps
-              /      |      \
-             /       |       \
-          app-1     app-2    app-3
-             \       |       /
-              \      |      /
-               v     v     v
-              MySQL Primary
-                    |
-                    | Replication
-                    v
-              MySQL Replica
-
-                    +
-                    |
-                  Redis
-
-12. Sharding
-
-Sharding is part of the distributed database scaling plan.
-
-The goal is to eventually distribute data across multiple database
-shards rather than storing all application data on one MySQL primary.
+The Token Bucket algorithm maintains a bucket containing tokens.
 
 Conceptually:
 
-                 Application
-                      |
-                Shard Router
-                 /    |    \
-                /     |     \
-               v      v      v
-           Shard 1  Shard 2  Shard 3
-             MySQL    MySQL    MySQL
+```text
+             Token Bucket
+          +---------------+
+          | ● ● ● ● ●     |
+          |               |
+          | capacity = N  |
+          +---------------+
+                  |
+             Request
+                  |
+          Token available?
+             /       \
+           Yes        No
+            |          |
+       Allow request   Reject
+                      HTTP 429
+```
 
-A shard key and routing strategy still need to be finalized and
-implemented.
+A request consumes one token.
 
-Therefore:
+Tokens are replenished over time according to the configured refill rate.
 
-Horizontal application scaling and MySQL replication were completed
-and verified today. Full database sharding is the next implementation
-stage.
+When the bucket has no tokens available, the request is rejected.
 
-13. What We Successfully Proved Today
+---
 
-Application layer
+# Rate Limiting Response
 
-Multiple Spring Boot application instances configured
+When the rate limit is exceeded, the API returns:
 
-Dockerized application
+```http
+HTTP/1.1 429 Too Many Requests
+```
 
-Horizontal scaling architecture established
+with the configured error message.
 
-Database layer
+This allows clients to distinguish rate limiting from other application errors.
 
-MySQL primary configured
+---
 
-MySQL replica configured
+# Rate Limiting Components
 
-Unique server IDs configured
+The rate-limiting implementation contains components responsible for:
 
-Binary logging enabled
+```text
+RateLimiter
+RateLimitService
+RateLimitExceededException
+TokenBucket
+Bucket
+```
 
-Replication user created
+The application uses Redis as the shared state store.
 
-Primary → replica connection established
+---
 
-Schema replication tested
+# Redis Configuration
 
-Data replication tested
+Redis is running as a Docker container:
 
-Delete replication tested
+```yaml
+redis:
+  image: redis:7-alpine
+```
 
-Infrastructure
+It is exposed on:
 
-Docker network configured
+```text
+6379
+```
 
-Persistent MySQL volumes configured
+The Spring Boot applications connect to Redis using:
 
-Redis configured
+```text
+REDIS_HOST=redis
+REDIS_PORT=6379
+```
 
-Spring Boot connected to MySQL primary
+Inside the Docker network, the applications communicate with Redis using the Docker service name:
 
-Flyway migrations successfully executed
+```text
+redis
+```
 
-Next
+---
 
-Design shard key
+# 2. Load Balancing
 
-Design shard-routing strategy
+Nginx was added as a **reverse proxy and load balancer**.
 
-Create multiple MySQL shards
+Instead of clients directly communicating with a single Spring Boot instance:
 
-Implement application-level shard routing
+```text
+Client
+   |
+   v
+App-1
+```
 
-Test data distribution across shards
+the client now communicates with Nginx:
 
-Combine sharding with replication
+```text
+Client
+   |
+   v
+Nginx
+   |
+   +----> App-1
+   |
+   +----> App-2
+   |
+   +----> App-3
+```
 
-Add load balancing/failover strategy
+---
 
-Test failure scenarios
+# Why Load Balancing?
 
-14. Key Learning
+The application is horizontally scaled to three Spring Boot instances:
 
-Today's architecture introduced an important distinction:
+```text
+App-1
+App-2
+App-3
+```
 
-Horizontal scaling
+Without a load balancer, clients would need to know which application instance to contact.
 
-Adds more application instances:
+Nginx provides a single entry point and distributes incoming requests among the available instances.
 
-app-1 + app-2 + app-3
+Benefits include:
 
-This increases application-layer capacity.
+* Distribution of incoming traffic
+* Horizontal scalability
+* Better utilization of application instances
+* A single public entry point
+* Improved fault tolerance when multiple instances are available
 
-Replication
+---
 
-Copies database changes:
+# Nginx Configuration
 
-Primary → Replica
+Nginx was added using the official Docker image:
 
-This improves read scalability and provides a database redundancy
-mechanism.
+```yaml
+nginx:
+  image: nginx:latest
+```
 
-Sharding
+Nginx uses the project configuration file:
 
-Splits data across multiple databases:
+```text
+nginx/
+└── nginx.conf
+```
 
-Shard 1
-Shard 2
-Shard 3
+The configuration defines the Spring Boot instances as backend servers:
 
-This is the next major step for scaling the database itself.
+```nginx
+upstream backend_servers {
 
-15. End-of-Day Status
+    server app-1:8080;
+    server app-2:8080;
+    server app-3:8080;
 
-Distributed URL Shortener
-        |
-        +-- Docker -------------------- DONE
-        |
-        +-- Redis --------------------- DONE
-        |
-        +-- Horizontal Scaling -------- DONE
-        |
-        +-- MySQL Primary ------------- DONE
-        |
-        +-- MySQL Replica ------------- DONE
-        |
-        +-- Primary → Replica --------- VERIFIED
-        |
-        +-- Application Data ---------- VERIFIED
-        |
-        +-- Database Sharding ---------- NEXT
+}
+```
 
-Today's major milestone: The project now has a clean, working
-Dockerized MySQL primary-replica setup with verified application-data
-replication, alongside horizontally scalable Spring Boot application
-instances.
+Requests are forwarded to the backend group using:
+
+```nginx
+proxy_pass http://backend_servers;
+```
+
+---
+
+# Load Balancing Algorithm
+
+Nginx uses **Round Robin** by default for the configured upstream servers.
+
+Conceptually:
+
+```text
+Request 1 → App-1
+Request 2 → App-2
+Request 3 → App-3
+Request 4 → App-1
+Request 5 → App-2
+Request 6 → App-3
+```
+
+This allows incoming requests to be distributed across the application instances.
+
+---
+
+# Nginx Port
+
+Port `80` on the host machine was already unavailable.
+
+Therefore, Nginx was exposed using:
+
+```yaml
+ports:
+  - "8081:80"
+```
+
+This means:
+
+```text
+Host:
+localhost:8081
+
+        ↓
+
+Docker:
+Nginx:80
+```
+
+Nginx itself continues to listen on port `80` inside the container.
+
+---
+
+# Request Flow
+
+The current request flow is:
+
+```text
+Postman / Client
+       |
+       v
+localhost:8081
+       |
+       v
+Nginx :80
+       |
+       v
++------+------+------+
+|      |             |
+v      v             v
+App-1 App-2        App-3
+ :8080 :8080        :8080
+       |
+       v
+ Redis / MySQL
+```
+
+The client does not need to know which Spring Boot instance handles the request.
+
+---
+
+# Docker Services
+
+The current Docker Compose setup contains:
+
+```text
+mysql-primary
+mysql-replica
+redis
+app-1
+app-2
+app-3
+nginx
+```
+
+### MySQL Primary
+
+```text
+Host: 3307
+Container: 3306
+```
+
+### MySQL Replica
+
+```text
+Host: 3308
+Container: 3306
+```
+
+### Redis
+
+```text
+Host: 6379
+Container: 6379
+```
+
+### Spring Boot App-1
+
+```text
+Host: 8080
+Container: 8080
+```
+
+### Spring Boot App-2
+
+```text
+Container: 8080
+```
+
+### Spring Boot App-3
+
+```text
+Container: 8080
+```
+
+### Nginx
+
+```text
+Host: 8081
+Container: 80
+```
+
+---
+
+# Docker Network
+
+All services communicate through the Docker bridge network:
+
+```text
+url-shortener-network
+```
+
+The applications can therefore communicate using Docker service names.
+
+For example:
+
+```text
+app-1 → redis:6379
+app-1 → mysql-primary:3306
+nginx → app-1:8080
+nginx → app-2:8080
+nginx → app-3:8080
+```
+
+No container needs to know the IP address of another container.
+
+Docker's internal DNS resolves the service names.
+
+---
+
+# Files Added / Modified
+
+## New Files
+
+```text
+nginx/
+└── nginx.conf
+```
+
+Rate limiting components:
+
+```text
+RateLimiter
+RateLimitService
+RateLimitExceededException
+TokenBucket
+Bucket
+```
+
+---
+
+## Modified Files
+
+```text
+docker-compose.yml
+```
+
+The Docker Compose file was updated to include:
+
+```text
+app-1
+app-2
+app-3
+nginx
+```
+
+along with Redis and MySQL services.
+
+---
+
+# Testing
+
+## Rate Limiting Test
+
+Send repeated requests to the API.
+
+When the configured token bucket is exhausted, the application should return:
+
+```http
+429 Too Many Requests
+```
+
+Example flow:
+
+```text
+Request
+   |
+   v
+Rate Limiter
+   |
+   +---- Token available → Continue
+   |
+   +---- No token → HTTP 429
+```
+
+---
+
+# Load Balancing Test
+
+The load balancer can be accessed through:
+
+```text
+http://localhost:8081
+```
+
+For example:
+
+```http
+POST http://localhost:8081/shortenUrl
+```
+
+The request path becomes:
+
+```text
+Client
+  ↓
+Nginx
+  ↓
+App-1 / App-2 / App-3
+  ↓
+Application
+  ↓
+Redis / MySQL
+```
+
+---
+
+# Useful Docker Commands
+
+### Start all services
+
+```bash
+docker compose up -d --build
+```
+
+### Stop all services
+
+```bash
+docker compose down
+```
+
+### Check service status
+
+```bash
+docker compose ps
+```
+
+### Check Nginx logs
+
+```bash
+docker logs url-shortener-nginx
+```
+
+### Check application logs
+
+```bash
+docker logs url-shortener-app-1
+```
+
+```bash
+docker logs url-shortener-app-2
+```
+
+```bash
+docker logs url-shortener-app-3
+```
+
+### Start only Nginx
+
+```bash
+docker compose up -d nginx
+```
+
+### Check available Compose services
+
+```bash
+docker compose config --services
+```
+
+---
+
+# Concepts Learned
+
+Today's implementation covered several important backend and distributed-systems concepts.
+
+### Rate Limiting
+
+* Token Bucket
+* Shared rate-limit state
+* Redis-based distributed rate limiting
+* HTTP `429 Too Many Requests`
+
+### Load Balancing
+
+* Reverse Proxy
+* Nginx
+* Horizontal Scaling
+* Round Robin
+* Backend server pools
+* Docker service discovery
+
+### Docker
+
+* Multi-container applications
+* Docker networks
+* Service names
+* Container-to-container communication
+* Port mapping
+* Docker Compose
+
+---
+
+# Current Architecture
+
+```text
+                         CLIENT
+                           |
+                           |
+                    localhost:8081
+                           |
+                           v
+                 +-------------------+
+                 |       NGINX       |
+                 | Reverse Proxy +   |
+                 | Load Balancer      |
+                 +-------------------+
+                    /      |      \
+                   /       |       \
+                  v        v        v
+              +------+ +------+ +------+
+              |App-1 | |App-2 | |App-3 |
+              +------+ +------+ +------+
+                  \        |        /
+                   \       |       /
+                    +------+------+
+                           |
+              +------------+------------+
+              |                         |
+              v                         v
+          +--------+              +-----------+
+          | Redis  |              |   MySQL   |
+          |        |              |  Primary  |
+          +--------+              +-----------+
+                                        |
+                                        v
+                                  +-----------+
+                                  |   MySQL   |
+                                  |  Replica  |
+                                  +-----------+
+```
+
+---
+
+# Next Steps
+
+The next improvements to the distributed URL shortener are:
+
+* Verify Round Robin distribution between all three application instances
+* Add application-instance identification for load-balancing testing
+* Test failure handling when one application instance goes down
+* Configure Nginx backend health/failure handling
+* Improve Nginx configuration
+* Complete database replication verification
+* Implement/verify database read/write separation
+* Further improve Redis caching
+* Container health checks
+* Production-oriented Docker configuration
+* Final deployment
+
+---
+
+# Technology Stack
+
+| Technology        | Purpose                                   |
+| ----------------- | ----------------------------------------- |
+| Java 17           | Programming language                      |
+| Spring Boot       | Backend framework                         |
+| Maven             | Build management                          |
+| MySQL             | Primary database                          |
+| MySQL Replication | Database redundancy                       |
+| Redis             | Caching, distributed state, rate limiting |
+| Nginx             | Reverse proxy and load balancer           |
+| Docker            | Containerization                          |
+| Docker Compose    | Multi-container orchestration             |
+| Flyway            | Database migrations                       |
+| Postman           | API testing                               |
+| Git/GitHub        | Version control                           |
+
+---
+
+# Project Goal
+
+The goal of this project is to build a **scalable, distributed URL shortener** that demonstrates real backend engineering concepts rather than only basic CRUD functionality.
+
+The system progressively incorporates:
+
+```text
+REST API
+   ↓
+Database
+   ↓
+Caching
+   ↓
+Concurrency
+   ↓
+Distributed Lock
+   ↓
+Rate Limiting
+   ↓
+Horizontal Scaling
+   ↓
+Load Balancing
+   ↓
+Database Replication
+   ↓
+Containerization
+   ↓
+Deployment
+```

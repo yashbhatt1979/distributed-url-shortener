@@ -204,6 +204,30 @@ services:
       - url-shortener-network
 
 
+  # ==========================================
+  # NGINX LOAD BALANCER
+  # ==========================================
+
+  nginx:
+    image: nginx:latest
+
+    container_name: url-shortener-nginx
+
+    ports:
+      - "8081:80"
+
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+    depends_on:
+      - app-1
+      - app-2
+      - app-3
+
+    networks:
+      - url-shortener-network
+
+
 # ==========================================
 # NETWORK
 # ==========================================
@@ -225,3 +249,4 @@ volumes:
   mysql_replica_data:
 
   redis_data:
+

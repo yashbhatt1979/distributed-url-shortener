@@ -11,23 +11,41 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.example.urlshortener.dto.ShortenUrlRequest;
 import com.example.urlshortener.dto.ShortenUrlResponse;
+import com.example.urlshortener.ratelimit.RateLimiter;
 import com.example.urlshortener.service.UrlService;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 @RestController
 @RequestMapping("/shortenUrl")
 public class UrlController {
 
     private final UrlService urlService;
+    private final RateLimiter rateLimiter;
 
-    public UrlController(UrlService urlService) {
+    public UrlController(
+            UrlService urlService,
+            RateLimiter rateLimiter) {
+
         this.urlService = urlService;
+        this.rateLimiter = rateLimiter;
     }
 
     @PostMapping
     public ResponseEntity<ShortenUrlResponse> shortenUrl(
-            @RequestBody ShortenUrlRequest request) {
+            @RequestBody ShortenUrlRequest request,
+            HttpServletRequest httpRequest) {
 
-        ShortenUrlResponse response = urlService.shortenUrl(request);
+        String clientIp = httpRequest.getRemoteAddr();
+
+        if (!rateLimiter.allowRequest(clientIp)) {
+            throw new com.example.urlshortener.ratelimit.RateLimitExceededException(
+                    "Too many requests. Please try again later."
+            );
+        }
+
+        ShortenUrlResponse response =
+                urlService.shortenUrl(request);
 
         return ResponseEntity
                 .status(HttpStatus.CREATED)
@@ -36,9 +54,19 @@ public class UrlController {
 
     @GetMapping("/{shortCode}")
     public ResponseEntity<String> redirectToOriginalUrl(
-            @PathVariable String shortCode) {
+            @PathVariable String shortCode,
+            HttpServletRequest httpRequest) {
 
-        String originalUrl = urlService.getOriginalUrl(shortCode);
+        String clientIp = httpRequest.getRemoteAddr();
+
+        if (!rateLimiter.allowRequest(clientIp)) {
+            throw new com.example.urlshortener.ratelimit.RateLimitExceededException(
+                    "Too many requests. Please try again later."
+            );
+        }
+
+        String originalUrl =
+                urlService.getOriginalUrl(shortCode);
 
         return ResponseEntity
                 .status(HttpStatus.FOUND)
